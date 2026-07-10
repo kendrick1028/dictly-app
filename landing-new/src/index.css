@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #05060d;
+  --bg-soft: #090b15;
+  --fg: #f3f4f8;
+  --muted: #9aa0b6;
+  --faint: #6b7088;
+  --accent: #7c6cff;
+  --accent-2: #38bdf8;
+  --accent-3: #22d3ee;
+  --line: rgba(255, 255, 255, 0.1);
+  --glass: rgba(255, 255, 255, 0.05);
+  --glass-strong: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.14);
+}
+
+* {
+  border-color: var(--line);
+}
+
+html {
+  scroll-behavior: smooth;
+  background: var(--bg);
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Pretendard', 'Inter', ui-sans-serif, system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  letter-spacing: -0.011em;
+  overflow-x: hidden;
+}
+
+::selection {
+  background: rgba(124, 108, 255, 0.35);
+  color: #fff;
+}
+
+/* numeric/latin display via Inter */
+.font-display {
+  font-family: 'Inter', 'Pretendard', sans-serif;
+}
+
+/* ---- gradients & text ---- */
+.text-gradient {
+  background: linear-gradient(100deg, #fff 0%, #c9c6ff 45%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.text-gradient-cool {
+  background: linear-gradient(100deg, #e7faff 0%, var(--accent-2) 60%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ---- liquid glass surfaces ---- */
+.glass {
+  background: var(--glass);
+  backdrop-filter: blur(18px) saturate(150%);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    0 16px 50px -22px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+}
+.glass-strong {
+  background: var(--glass-strong);
+  backdrop-filter: blur(28px) saturate(160%);
+  -webkit-backdrop-filter: blur(28px) saturate(160%);
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    0 30px 80px -30px rgba(0, 0, 0, 0.8),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+}
+/* iridescent liquid-glass sheen */
+.glass-sheen {
+  position: relative;
+  overflow: hidden;
+}
+.glass-sheen::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  background: linear-gradient(
+    130deg,
+    transparent 30%,
+    rgba(124, 108, 255, 0.14) 45%,
+    rgba(56, 189, 248, 0.12) 55%,
+    transparent 70%
+  );
+  background-size: 300% 300%;
+  animation: sheen 8s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes sheen {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+
+.glow {
+  box-shadow: 0 0 60px -12px rgba(124, 108, 255, 0.5);
+}
+
+/* aurora blobs for backgrounds */
+@keyframes drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+  33% { transform: translate3d(4%, -6%, 0) scale(1.08); }
+  66% { transform: translate3d(-5%, 4%, 0) scale(0.96); }
+}
+.aurora {
+  filter: blur(70px);
+  animation: drift 22s ease-in-out infinite;
+}
+
+/* shader / scan line sweep */
+@keyframes scan {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(120%); }
+}
+
+/* gentle grid */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 64px 64px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 30%, transparent 75%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 30%, transparent 75%);
+}
+
+@keyframes cardFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* hero-futuristic word reveal */
+@keyframes ffFadeIn {
+  0% { opacity: 0; transform: translateY(18px); filter: blur(6px); }
+  100% { opacity: 1; transform: translateY(0); filter: blur(0); }
+}
+.ff-fade-in {
+  animation: ffFadeIn 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.ff-fade-in-subtitle {
+  animation: ffFadeIn 0.8s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

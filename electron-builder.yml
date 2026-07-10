@@ -1,0 +1,46 @@
+appId: io.dictly.app
+productName: Dictly
+# strip xattr "detritus" from the bundle right before signing (codesign rejects it)
+afterPack: scripts/afterPack.cjs
+directories:
+  buildResources: build
+files:
+  - out/**
+  - package.json
+extraResources:
+  # bundles python/ INCLUDING the self-contained runtime/ (standalone CPython + all STT
+  # deps), so the sidecar runs without any user setup. The dev-only .venv is excluded; models
+  # download on first use into the app's userData dir.
+  - from: python
+    to: python
+    filter:
+      # NOTE: do NOT exclude '**/tests/**' — some site-packages (e.g. numpy._core.tests)
+      # are imported at runtime, and excluding them broke `import mlx_whisper` → silent CPU
+      # fallback. The big CPython stdlib test dirs are pruned from disk instead (see runtime
+      # setup), so no test filter is needed here.
+      - '**/*'
+      - '!.venv/**'
+      - '!models/**'
+mac:
+  category: public.app-category.productivity
+  icon: build/icon.icns
+  # Pin the signing identity so electron-builder ALWAYS signs with this Apple Development cert and
+  # never silently ad-hoc/unsigned-falls-back. A STABLE, CORRECT identity is what keeps the macOS
+  # Screen-Recording (system-audio) TCC grant working: TCC binds the grant to the app's designated
+  # requirement, derived from this identity + the io.dictly.app identifier. ⚠️ NEVER re-sign the
+  # bundle afterwards with a custom `codesign -i <name>` — doing that once set the main executable's
+  # identifier to "csfix_bin", which broke the TCC match so the granted permission did nothing.
+  identity: "Apple Development: kendrick1028@naver.com (F55KYWM79W)"
+  # keep Apple-cert signing, but disable the per-file secure timestamp (network) — only needed for
+  # notarized distribution; the 32k-file bundle made intermittent timestamp-server failures abort
+  # the whole sign. "none" → codesign --timestamp=none (no network) → reliable local signed build.
+  timestamp: none
+  target: dmg
+  # The bundled Python ships its own (3rd-party-signed) native libs (mlx/Metal, numpy,
+  # ctranslate2) and compiles Metal kernels at runtime — hardened runtime's library
+  # validation + JIT restrictions would block them. Disabled for the local/ad-hoc build;
+  # a notarized Developer-ID build would re-enable it with the matching entitlements.
+  hardenedRuntime: false
+  extendInfo:
+    NSMicrophoneUsageDescription: Dictly는 강의·회의 음성을 녹음하여 텍스트로 변환합니다.
+    NSScreenCaptureUsageDescription: Dictly는 시스템 오디오를 캡처하여 텍스트로 변환합니다.

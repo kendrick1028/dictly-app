@@ -1,0 +1,5 @@
+# MLX (Apple-Silicon GPU) is the primary engine; faster-whisper is the CPU fallback.
+mlx-whisper>=0.4.0 ; platform_machine == "arm64" and sys_platform == "darwin"
+faster-whisper>=1.1.0
+websockets>=12.0
+numpy>=1.24,<2.3

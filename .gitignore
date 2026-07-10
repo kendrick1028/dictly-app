@@ -1,0 +1,17 @@
+node_modules/
+out/
+dist/
+*.log
+.DS_Store
+python/.venv/
+python/models/
+.vite/
+python/runtime/
+
+# --- backup scope: user data + large media binaries (not app source) ---
+Dictly save/
+*.webm
+*.pcm
+*.mp4
+*.mov
+*.pptx

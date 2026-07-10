@@ -1,0 +1,603 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  /* accent theme (RGB triplets) — default #0F0E47 navy; JS swaps per settings selection */
+  --accent: 15 14 71;
+  --accent-soft: 58 58 122;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* drop the default (orange/amber) outline on MOUSE focus, but keep a clear accent ring on
+   KEYBOARD focus (:focus-visible) so keyboard users can always see where they are. */
+button:focus:not(:focus-visible),
+[role='button']:focus:not(:focus-visible),
+a:focus:not(:focus-visible) {
+  outline: none;
+}
+button:focus-visible,
+[role='button']:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid rgb(var(--accent) / 0.6);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+body {
+  @apply bg-sidebar text-ink font-sans;
+  font-size: 14px;
+}
+
+.drag {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* slim scrollbars */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* liquid-glass surfaces (Spotlight search) */
+.dictly-glass {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(255, 255, 255, 0.58));
+  backdrop-filter: blur(30px) saturate(180%);
+  -webkit-backdrop-filter: blur(30px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow:
+    0 28px 70px -16px rgba(15, 14, 71, 0.34),
+    0 2px 8px rgba(0, 0, 0, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+.dictly-glass-backdrop {
+  background: rgba(18, 18, 30, 0.16);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.dictly-glass-chip {
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+/* spiral AI loader: glassy black beads with refraction highlight + soft bloom/bleed */
+@keyframes dictly-spiral {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 1;
+  }
+}
+.dictly-spiral-dot {
+  position: absolute;
+  border-radius: 9999px;
+  background: #0a0a0f;
+  transform: translate(-50%, -50%) scale(0);
+  animation: dictly-spiral 1.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+@keyframes dictly-spotlight-in {
+  from {
+    opacity: 0;
+    transform: translateY(-8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.dictly-spotlight-in {
+  animation: dictly-spotlight-in 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes dictly-spotlight-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+  }
+}
+.dictly-spotlight-out {
+  animation: dictly-spotlight-out 0.15s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+@keyframes dictly-backdrop-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes dictly-backdrop-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+.dictly-backdrop-in {
+  animation: dictly-backdrop-in 0.18s ease forwards;
+}
+.dictly-backdrop-out {
+  animation: dictly-backdrop-out 0.16s ease forwards;
+}
+/* centered modal panel entrance (settings / connect / agents / timetable) */
+@keyframes dictly-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.dictly-modal-in {
+  animation: dictly-modal-in 0.19s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* in-transcript search — highlight only the matched text (yellow), active match orange */
+.dictly-search-hl {
+  background: #fde047; /* yellow-300 */
+  border-radius: 2px;
+  padding: 0 1px;
+  color: inherit;
+}
+.dictly-search-hl-active {
+  background: #fb923c; /* orange-400 */
+  color: #fff;
+}
+
+/* markdown rendering */
+.prose-dictly {
+  @apply text-[15px] leading-relaxed text-ink;
+}
+.prose-dictly h1 {
+  @apply text-xl font-semibold mt-4 mb-2;
+}
+.prose-dictly h2 {
+  @apply text-lg font-semibold mt-4 mb-2;
+}
+.prose-dictly h3 {
+  @apply text-base font-semibold mt-3 mb-1.5;
+}
+.prose-dictly p {
+  @apply my-2;
+}
+.prose-dictly ul {
+  @apply list-disc pl-5 my-2 space-y-1;
+}
+.prose-dictly ol {
+  @apply list-decimal pl-5 my-2 space-y-1;
+}
+.prose-dictly code {
+  @apply bg-black/5 rounded px-1 py-0.5 text-[13px];
+}
+.prose-dictly pre {
+  @apply bg-black/5 rounded-lg p-3 my-2 overflow-x-auto;
+}
+/* callout-style blockquote (정의·공식·핵심 개념 강조 — 요약/스튜디오 메모) */
+.prose-dictly blockquote {
+  @apply my-2.5 rounded-r-lg border-l-[3px] border-accent/60 bg-accent/[0.06] py-2 pl-3 pr-2.5 text-ink;
+}
+.prose-dictly blockquote p {
+  @apply my-0.5;
+}
+.prose-dictly table {
+  @apply border-collapse my-2;
+}
+.prose-dictly th,
+.prose-dictly td {
+  @apply border border-black/10 px-2 py-1;
+}
+.katex {
+  font-size: 1.05em;
+}
+
+/* clock/timestamp numerals: tabular digits with a plain (non-slashed) zero.
+   Uses the sans body font (round 0) instead of a monospace font that slashes 0. */
+.clock {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  letter-spacing: 0.01em;
+}
+
+/* segment jumped-to via a citation/bookmark — briefly recolor its text (no box) */
+.dictly-flash-seg .prose-dictly,
+.dictly-flash-seg .prose-dictly * {
+  color: rgb(var(--accent));
+  transition: color 0.25s ease;
+}
+/* segment whose audio is currently playing — mark its text with the highlight color */
+.playing-seg .prose-dictly p {
+  display: inline;
+  background: #fef08a;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  border-radius: 3px;
+  padding: 0.06em 0.15em;
+  line-height: 1.9;
+}
+.playing-seg .prose-dictly li,
+.playing-seg .prose-dictly h1,
+.playing-seg .prose-dictly h2,
+.playing-seg .prose-dictly h3,
+.playing-seg .prose-dictly h4 {
+  background: #fef08a;
+  border-radius: 3px;
+  padding: 0.06em 0.2em;
+}
+/* highlight (==/<mark>) styling */
+.prose-dictly mark {
+  background: #fef08a;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+/* "currently transcribing" wave dots */
+@keyframes dictly-dot {
+  0%,
+  70%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  35% {
+    transform: translateY(-5px);
+    opacity: 1;
+  }
+}
+.dictly-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: rgb(var(--accent));
+  animation: dictly-dot 1.5s infinite ease-in-out;
+}
+
+/* "being corrected by AI" — a diagonal, semi-opaque white band sweeps across the
+   TEXT only (skeleton-shimmer style); the text isn't blurred, just briefly veiled
+   where the band passes. */
+.dictly-correcting {
+  position: relative;
+  overflow: hidden;
+}
+.dictly-correcting::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    110deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.5) 50%,
+    transparent 70%
+  );
+  transform: translateX(-130%);
+  /* slower + phase-synced: --corr-delay is set per render in TranscriptTab from a shared
+     clock, so every sentence being corrected sweeps together as one wave (no out-of-phase
+     flicker / eye strain). Softer/wider gradient also calms it. */
+  animation: dictly-sweep 3.2s ease-in-out infinite;
+  animation-delay: var(--corr-delay, 0s);
+  will-change: transform;
+}
+@keyframes dictly-sweep {
+  to {
+    transform: translateX(130%);
+  }
+}
+
+/* recording pill: the waveform area unfurls (pill stretches) as the pulse appears */
+@keyframes dictly-wave-grow {
+  from {
+    width: 0;
+    opacity: 0;
+  }
+  to {
+    width: 7rem;
+    opacity: 1;
+  }
+}
+.dictly-wave-grow {
+  overflow: hidden;
+  animation: dictly-wave-grow 440ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* recording controls easing in */
+@keyframes dictly-pop-in {
+  from {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.dictly-pop-in {
+  animation: dictly-pop-in 360ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* mindmap node entrance (plays when a subtree is expanded) */
+@keyframes dictly-mm-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.dictly-mm-in {
+  animation: dictly-mm-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* section cards (PDF / studio / rail / fullscreen) easing in when they open */
+@keyframes dictly-section-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.dictly-anim-in {
+  animation: dictly-section-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* PDF annotation hover affordance (click-to-seek) */
+.dictly-ann {
+  transition: filter 120ms ease;
+}
+.dictly-ann:hover {
+  filter: brightness(1.12) drop-shadow(0 0 1px rgb(var(--accent) / 0.6));
+}
+/* simple small pen cursor for draw tools — hotspot at the nib tip (bottom-left) so the line
+   originates exactly at the tip */
+.dictly-cursor-pen {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='17' height='17' viewBox='0 0 24 24' fill='%23111827' stroke='%23ffffff' stroke-width='1'%3E%3Cpath d='M16.5 3.2a2.3 2.3 0 0 1 3.3 3.3L7 19.3l-4.2 1 1-4.2z'/%3E%3C/svg%3E") 2 14, crosshair;
+}
+
+/* ===== Connected note editor (TipTap / ProseMirror) ===== */
+.dictly-note-prose {
+  font-size: 15px;
+  color: #1f2329;
+  min-height: 100%; /* click anywhere in the body to place the caret */
+}
+.dictly-note-prose:focus {
+  outline: none;
+}
+/* Korean fonts have no italic face — re-enable synthesized oblique (root sets font-synthesis:none) */
+.dictly-note-prose em,
+.dictly-note-prose i {
+  font-style: italic;
+  font-synthesis: style;
+}
+.dictly-note-prose > * + * {
+  margin-top: 0.5em;
+}
+.dictly-note-prose h1 {
+  font-size: 1.6em;
+  font-weight: 700;
+  margin-top: 0.8em;
+}
+.dictly-note-prose h2 {
+  font-size: 1.35em;
+  font-weight: 700;
+  margin-top: 0.7em;
+}
+.dictly-note-prose h3 {
+  font-size: 1.15em;
+  font-weight: 600;
+  margin-top: 0.6em;
+}
+.dictly-note-prose h4 {
+  font-size: 1.02em;
+  font-weight: 600;
+  margin-top: 0.5em;
+}
+.dictly-note-prose ul {
+  list-style: disc;
+  padding-left: 1.4em;
+}
+.dictly-note-prose ol {
+  list-style: decimal;
+  padding-left: 1.4em;
+}
+/* a list item's own block must not also carry the paragraph/heading indent margin
+   (the list handles indentation) — overrides the inline margin-left from the Indent attr */
+.dictly-note-prose li > p,
+.dictly-note-prose li > h1,
+.dictly-note-prose li > h2,
+.dictly-note-prose li > h3,
+.dictly-note-prose li > h4 {
+  margin-left: 0 !important;
+}
+.dictly-note-prose blockquote {
+  border-left: 3px solid rgb(var(--accent) / 0.5);
+  background: rgb(var(--accent) / 0.05);
+  padding: 0.2em 0.8em;
+  border-radius: 0 6px 6px 0;
+  color: #3a3f47;
+}
+.dictly-note-prose code {
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 4px;
+  padding: 0.1em 0.3em;
+  font-size: 0.9em;
+}
+.dictly-note-prose pre {
+  background: #1f2329;
+  color: #f5f5f5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+}
+.dictly-note-prose pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+.dictly-note-prose hr {
+  border: none;
+  border-top: 1px solid rgba(0, 0, 0, 0.12);
+  margin: 0.8em 0;
+}
+.dictly-note-prose a {
+  color: #1d4ed8;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.dictly-note-prose mark {
+  background: #fde68a;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+/* task list */
+.dictly-note-prose ul[data-type='taskList'] {
+  list-style: none;
+  padding-left: 0.2em;
+}
+.dictly-note-prose ul[data-type='taskList'] li {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5em;
+}
+.dictly-note-prose ul[data-type='taskList'] li > label {
+  margin-top: 0.15em;
+}
+.dictly-note-prose ul[data-type='taskList'] li > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* tables (column-resizable) */
+.dictly-note-prose table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+  margin: 0.6em 0;
+  overflow: hidden;
+}
+.dictly-note-prose td,
+.dictly-note-prose th {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  padding: 5px 8px;
+  vertical-align: top;
+  position: relative;
+  min-width: 40px;
+}
+.dictly-note-prose th {
+  background: rgba(0, 0, 0, 0.03);
+  font-weight: 600;
+}
+.dictly-note-prose .selectedCell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgb(var(--accent) / 0.12);
+  pointer-events: none;
+}
+.dictly-note-prose .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: -2px;
+  width: 4px;
+  background: rgb(var(--accent) / 0.5);
+  cursor: col-resize;
+}
+.dictly-note-prose .tableWrapper {
+  overflow-x: auto;
+}
+/* placeholder */
+.dictly-note-prose p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: #b6bac2;
+  pointer-events: none;
+  height: 0;
+}
+/* citation chip + hashtag chip */
+.dictly-note-cite {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  vertical-align: baseline;
+  margin: 0 1px 0 0.4em; /* always a gap before the chip */
+  padding: 0 5px;
+  border-radius: 5px;
+  background: rgb(var(--accent) / 0.1);
+  color: rgb(var(--accent));
+  font-size: 0.8em;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+.dictly-note-cite:hover {
+  background: rgb(var(--accent) / 0.18);
+}
+.dictly-note-hashtag {
+  color: #6f7bd0;
+  font-weight: 600;
+  cursor: default;
+}
+/* gap cursor — lets the caret sit before/after a table (or other leaf block) */
+.dictly-note-prose .ProseMirror-gapcursor,
+.ProseMirror-gapcursor {
+  display: none;
+  pointer-events: none;
+  position: absolute;
+}
+.ProseMirror-gapcursor::after {
+  content: '';
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 24px;
+  border-top: 1px solid #1f2329;
+  animation: dictly-gapcursor-blink 1.1s steps(2, start) infinite;
+}
+@keyframes dictly-gapcursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+.ProseMirror-focused .ProseMirror-gapcursor {
+  display: block;
+}
