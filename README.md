@@ -1,5 +1,7 @@
 # Dictly
 
+> **다운로드**: [최신 릴리스](https://github.com/kendrick1028/dictly-app/releases/latest) — macOS(Apple Silicon) `.dmg` · Windows x64 `Setup.exe`. 앱 소개는 https://dictly-six.vercel.app
+
 로컬 Whisper 모델로 동작하는 한국어 음성인식 기록 앱. 강의·회의 녹음을 텍스트로
 전사하고, **말로 표현된 수식을 실제 수식(아래/위첨자·시그마·분수)으로 렌더링**합니다.
 재무관리·회계 등 과목별 강의에 특화되어 있습니다.
