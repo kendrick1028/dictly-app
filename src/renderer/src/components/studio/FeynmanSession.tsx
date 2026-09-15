@@ -7,7 +7,7 @@ import { Loader2, Send, Square } from 'lucide-react'
 import { useStore } from '../../store/useStore'
 import { CitedMarkdown } from './cite/CitedMarkdown'
 import { ModelMenu } from '../ModelSelect'
-import { prepareStudioContext, resolveStudioTarget, type StudioContext } from '../../lib/studioJobs'
+import { prepareStudioContext, resolveStudioTarget, targetFromItem, type StudioContext } from '../../lib/studioJobs'
 import { parseFeynmanQuestions } from '../../lib/studioParse'
 import { buildFocusSummary, makeRound, parseScoreTail, weightedScore } from '../../lib/feynman'
 import { stripCiteTokens } from '../../lib/citations'
@@ -73,14 +73,13 @@ export function FeynmanSession({ itemId }: { itemId: number }): JSX.Element {
     }
 
     const init = async (): Promise<void> => {
-      const target = resolveStudioTarget()
-      if (!target) {
-        backToHub()
-        return
-      }
-
       // brand-new session: generate questions, create the item, then remount with the real id
       if (itemId === 0) {
+        const target = resolveStudioTarget()
+        if (!target) {
+          backToHub()
+          return
+        }
         setPhase({ k: 'gen', msg: '복습 질문을 만들고 있어요…' })
         const ctx = await prepareStudioContext(target)
         if (!alive()) return
@@ -120,6 +119,12 @@ export function FeynmanSession({ itemId }: { itemId: number }): JSX.Element {
       const content = it.content as FeynmanContent
       const cur = content.rounds[content.currentRound] ?? content.rounds[content.rounds.length - 1]
 
+      // resume from the ITEM's own stored sources — no live selection required
+      const target = targetFromItem(it)
+      if (!target) {
+        setPhase({ k: 'error', msg: '이 항목의 소스를 찾을 수 없습니다.' })
+        return
+      }
       const ctx = await prepareStudioContext(target, { quiet: true })
       if (!alive()) return
       if (!ctx) {

@@ -11,6 +11,7 @@ import { jsPDF } from 'jspdf'
 import { stripCiteTokens } from './citations'
 import { MarkdownMath } from '../components/MarkdownMath'
 import { studioItemToHtml, type PageSize } from './studioHtml'
+import { studioItemToMarkdown } from './studioMarkdown'
 import type { FeynmanContent, FlashcardsContent, MnemonicContent, QuizContent, StudioItem, SummaryContent, TablesContent } from '../../../shared/types'
 
 const PAGE_W = 760 // off-screen sheet content width (px)
@@ -239,6 +240,8 @@ function buildPages(item: StudioItem): { nodes: ReactNode[]; mode: 'flow' | 'fit
       const tables = (item.content as TablesContent).tables
       return { nodes: tables.map((t, i) => <TableSheet key={i} docTitle={title} table={t} />), mode: 'fit' }
     }
+    case 'live_tutor':
+      return { nodes: [<SummarySheet md={studioItemToMarkdown(item)} />], mode: 'flow' }
     default:
       return { nodes: [<SummarySheet md={'```json\n' + JSON.stringify(item.content, null, 2) + '\n```'} />], mode: 'flow' }
   }

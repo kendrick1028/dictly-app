@@ -52,17 +52,27 @@ fi
 codesign --verify --deep --strict --verbose=1 "$APP" 2>&1 | tail -2 || true
 codesign -dvv "$APP" 2>&1 | grep -iE "Authority=Apple Develop" | head -1 || true
 
-echo "▶ [6/6] DMG 복사 + 정리"
+echo "▶ [6/6] 릴리스 아티팩트 복사 + 정리"
 DMG="$(find "$OUT" -name '*.dmg' | head -1)"
 if [ -z "$DMG" ]; then
   echo "ERROR: DMG가 생성되지 않음" >&2
   exit 1
 fi
-cp "$DMG" dist/
+# 자동 업데이트에는 ZIP + latest-mac.yml 이 필요하다 (Squirrel.Mac 은 DMG 를 못 씀).
+# GitHub 릴리스에 dmg/zip/blockmap/latest-mac.yml 을 모두 올려야 업데이트가 동작한다.
+ZIP="$(find "$OUT" -maxdepth 1 -name '*-mac.zip' | head -1)"
+YML="$OUT/latest-mac.yml"
+if [ -z "$ZIP" ] || [ ! -f "$YML" ]; then
+  echo "WARN: ZIP 또는 latest-mac.yml 이 없습니다 — 자동 업데이트가 동작하지 않습니다." >&2
+fi
+for f in "$DMG" "$DMG.blockmap" "$ZIP" "${ZIP:+$ZIP.blockmap}" "$YML"; do
+  [ -n "$f" ] && [ -f "$f" ] && cp "$f" dist/
+done
 SIZE=$(stat -f %z "$DMG")
 rm -rf "$OUT"
 echo ""
 echo "🎉 완료 — dist/$(basename "$DMG")  (${SIZE} bytes, 식별자 io.dictly.app 검증됨)"
+[ -n "$ZIP" ] && echo "   자동 업데이트용: dist/$(basename "$ZIP") + dist/latest-mac.yml"
 echo ""
 echo "── 설치 후 시스템 오디오 권한 재설정 (필요 시) ──"
 echo "  새 앱을 /응용 프로그램 에 덮어쓴 뒤, 필요하면 터미널에서 한 번:"

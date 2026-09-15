@@ -1,13 +1,14 @@
 // Studio hub: NotebookLM-style 2-column feature grid + stacked list of saved studio memos.
 // Generations run as background jobs (several at once) shown as progress rows in the list.
 import { useEffect, useRef, useState } from 'react'
-import { ChevronRight, Loader2, MoreVertical, RotateCw, Square, Trash2, X } from 'lucide-react'
+import { ChevronRight, Loader2, MoreVertical, RotateCw, Send, Square, Trash2, X } from 'lucide-react'
 import { useStore } from '../../store/useStore'
 import { fmtRelative } from '../../lib/time'
 import { stripCiteTokens } from '../../lib/citations'
 import { MarkdownMath } from '../MarkdownMath'
 import { cancelStudioJob, dismissStudioJob, retryStudioJob, startStudioJob, type StudioJob } from '../../lib/studioJobs'
 import { studioKindLabel } from '../../lib/studioParse'
+import { exportStudioToNotion } from '../../lib/notionExport'
 import { STUDIO_KINDS, kindMeta } from './studioMeta'
 import { StudioOptionsModal } from './StudioOptionsModal'
 import type { StudioItem, StudioKind } from '../../../../shared/types'
@@ -50,12 +51,27 @@ function ItemRow({ item }: { item: StudioItem }): JSX.Element {
   const openStudioItem = useStore((s) => s.openStudioItem)
   const deleteStudioItemAction = useStore((s) => s.deleteStudioItemAction)
   const requestConfirm = useStore((s) => s.requestConfirm)
+  const showToast = useStore((s) => s.showToast)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
   const meta = kindMeta(item.kind)
-  // in-progress Feynman review → show a "진행 중" badge (clicking resumes the session)
+  const toNotion = async (): Promise<void> => {
+    setMenuOpen(false)
+    setExporting(true)
+    try {
+      await exportStudioToNotion(item)
+    } catch (e) {
+      showToast(`Notion 내보내기 실패: ${(e as Error).message}`)
+    } finally {
+      setExporting(false)
+    }
+  }
+  // in-progress Feynman review / 튜터 session → show a "진행 중" badge (clicking resumes the session)
   const fc = item.kind === 'feynman' ? (item.content as { rounds?: { status?: string }[]; currentRound?: number }) : null
-  const active = fc?.rounds?.[fc.currentRound ?? (fc.rounds.length - 1)]?.status === 'active'
+  const active =
+    fc?.rounds?.[fc.currentRound ?? (fc.rounds.length - 1)]?.status === 'active' ||
+    (item.kind === 'tutor' && (item.content as { status?: string })?.status === 'active')
 
   useEffect(() => {
     if (!menuOpen) return
@@ -85,12 +101,17 @@ function ItemRow({ item }: { item: StudioItem }): JSX.Element {
       <div className="relative" ref={menuRef}>
         <button
           onClick={() => setMenuOpen((v) => !v)}
-          className="rounded-md p-1 text-subtle opacity-0 transition hover:bg-black/5 group-hover/item:opacity-100"
+          disabled={exporting}
+          className={`rounded-md p-1 text-subtle transition hover:bg-black/5 group-hover/item:opacity-100 ${exporting ? 'opacity-100' : 'opacity-0'}`}
         >
-          <MoreVertical size={14} />
+          {exporting ? <Loader2 size={14} className="animate-spin" /> : <MoreVertical size={14} />}
         </button>
         {menuOpen && (
-          <div className="absolute right-0 top-full z-30 mt-1 w-32 rounded-lg border border-black/10 bg-white py-1 shadow-lg">
+          <div className="absolute right-0 top-full z-30 mt-1 w-44 rounded-lg border border-black/10 bg-white py-1 shadow-lg">
+            <button onClick={() => void toNotion()} className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink hover:bg-black/5">
+              <Send size={12} /> Notion으로 내보내기
+            </button>
+            <div className="my-1 h-px bg-black/5" />
             <button
               onClick={() => {
                 setMenuOpen(false)
@@ -137,11 +158,21 @@ export function StudioHub(): JSX.Element {
   return (
     <div className="dictly-anim-in flex h-full min-h-0 flex-col">
       <div className="grid shrink-0 grid-cols-2 gap-2 px-3 pt-1">
-        {STUDIO_KINDS.map((k) => (
+        {STUDIO_KINDS.filter((k) => !k.hidden).map((k) => (
           <button
             key={k.kind}
             disabled={disabled}
-            title={disabled ? disabledTip : k.kind === 'feynman' ? '파인만 복습 생성 (백그라운드 — 목록에 추가됨)' : k.kind === 'exam_radar' ? '시험 레이더 생성 (중요도×난이도 맵)' : `${k.label} 만들기`}
+            title={
+              disabled
+                ? disabledTip
+                : k.kind === 'feynman'
+                  ? '파인만 복습 생성 (백그라운드 — 목록에 추가됨)'
+                  : k.kind === 'exam_radar'
+                    ? '시험 레이더 생성 (중요도×난이도 맵)'
+                    : k.kind === 'tutor'
+                      ? '1:1 튜터 수업 시작 (한 개념씩 · 진도/이해도 추적)'
+                      : `${k.label} 만들기`
+            }
             onClick={() => (k.kind === 'feynman' || k.kind === 'exam_radar' ? startStudioJob(k.kind, {}) : setOptionsFor(k.kind))}
             className={`group/card flex items-center gap-2 rounded-2xl p-3 text-left transition ${k.tile} ${
               disabled ? 'opacity-50' : 'hover:brightness-[0.98] active:scale-[0.99]'
@@ -182,6 +213,12 @@ export function StudioHub(): JSX.Element {
           onClose={() => setOptionsFor(null)}
           onCreate={(kind, opts) => {
             setOptionsFor(null)
+            if (kind === 'tutor') {
+              // interactive session, not a background generation job
+              const o = opts as { tutorMode?: 'learn' | 'sprint'; subject?: string }
+              useStore.getState().startTutorSession({ mode: o.tutorMode ?? 'learn', subject: o.subject ?? '' })
+              return
+            }
             startStudioJob(kind, opts as Record<string, unknown>)
           }}
         />

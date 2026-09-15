@@ -50,14 +50,18 @@ body {
   -webkit-app-region: no-drag;
 }
 
-/* slim scrollbars */
+/* slim overlay-style scrollbars: invisible until the element is being scrolled
+   (App.tsx stamps data-scrolling on the scrolling element for ~0.9 s) */
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 *::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.15);
+  background: transparent;
   border-radius: 8px;
+}
+[data-scrolling]::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.22);
 }
 *::-webkit-scrollbar-track {
   background: transparent;
@@ -327,7 +331,7 @@ body {
     opacity: 0;
   }
   to {
-    width: 7rem;
+    width: 2.5rem;
     opacity: 1;
   }
 }
@@ -601,3 +605,55 @@ body {
 .ProseMirror-focused .ProseMirror-gapcursor {
   display: block;
 }
+
+/* AI 튜터 roadmap chip row: horizontal scroll without a visible scrollbar */
+.dictly-no-scrollbar {
+  scrollbar-width: none;
+}
+.dictly-no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* 교안 자동 넘김: a brief ring on the page the tracker just turned to */
+@keyframes dictly-autopage-flash {
+  0% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.dictly-autopage-flash { animation: dictly-autopage-flash 1.8s ease-out both; }
+
+/* what's-new pages sliding in from the right (다음) / left (이전) */
+@keyframes dictly-wn-in-r {
+  from { opacity: 0; transform: translateX(18px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes dictly-wn-in-l {
+  from { opacity: 0; transform: translateX(-18px); }
+  to   { opacity: 1; transform: none; }
+}
+.dictly-wn-in-r { animation: dictly-wn-in-r 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+.dictly-wn-in-l { animation: dictly-wn-in-l 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* skeleton shimmer (실시간 튜터 카드가 생성되기 전) */
+@keyframes dictly-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.dictly-shimmer {
+  background: linear-gradient(90deg, rgba(0,0,0,0.06) 25%, rgba(0,0,0,0.12) 50%, rgba(0,0,0,0.06) 75%);
+  background-size: 200% 100%;
+  animation: dictly-shimmer 1.4s ease-in-out infinite;
+}
+/* 교안 자동 넘김: brief blip on the pill each time a chunk is analysed */
+@keyframes dictly-scan-blip {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16,185,129,0.45); }
+  100% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16,185,129,0); }
+}
+.dictly-scan-blip { animation: dictly-scan-blip 0.7s ease-out both; }
+
+/* what's-new demo: mirrored pulse bars breathing */
+@keyframes dictly-wn-bar {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+.dictly-wn-bar { transform-origin: center; animation: dictly-wn-bar 1.15s ease-in-out infinite; }

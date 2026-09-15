@@ -1,7 +1,7 @@
 // Folder workspace: 소스(체크박스 목록) | 미리보기 | 스튜디오(폴더 소스 기반 생성).
 import { useEffect, useState } from 'react'
 import { Panel, PanelGroup } from 'react-resizable-panels'
-import { ChevronRight, FileText, FolderOpen, StickyNote, Volume2 } from 'lucide-react'
+import { ChevronRight, Eye, FileText, FolderOpen, PanelLeftClose, PanelLeftOpen, StickyNote, Volume2, X } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import { ResizeHandle } from './ResizeHandle'
 import { StudioPanel, StudioRail } from './StudioPanel'
@@ -83,6 +83,7 @@ function SourcesPane(): JSX.Element {
   const setNoteIds = useStore((s) => s.setFolderSrcNoteIds)
   const setPreview = useStore((s) => s.setFolderPreview)
   const preview = useStore((s) => s.folderPreview)
+  const toggleCollapsed = useStore((s) => s.toggleFolderSourcesCollapsed)
   const [transcriptsOpen, setTranscriptsOpen] = useState(true)
   const [pdfsOpen, setPdfsOpen] = useState(true)
   const [notesOpen, setNotesOpen] = useState(true)
@@ -106,7 +107,12 @@ function SourcesPane(): JSX.Element {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="shrink-0 px-3 pb-1.5 pt-2.5 text-[11px] font-semibold uppercase tracking-wide text-subtle">소스</div>
+      <div className="flex shrink-0 items-center gap-2 px-3 pb-1.5 pt-2.5">
+        <span className="flex-1 text-[11px] font-semibold uppercase tracking-wide text-subtle">소스</span>
+        <button onClick={toggleCollapsed} className="rounded p-1 text-subtle hover:bg-black/5 hover:text-ink" title="소스 접기">
+          <PanelLeftClose size={15} />
+        </button>
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {/* 전사문 그룹 */}
         <SectionHeader
@@ -210,10 +216,36 @@ function SourcesPane(): JSX.Element {
   )
 }
 
+/** Collapsed 소스: narrow rail with an expand button + total source count. */
+function SourcesRail(): JSX.Element {
+  const toggleCollapsed = useStore((s) => s.toggleFolderSourcesCollapsed)
+  const memos = useStore((s) => s.memos)
+  const folderPdfs = useStore((s) => s.folderPdfs)
+  const folderNotes = useStore((s) => s.folderNotes)
+  const pdfCount = new Set(folderPdfs.map((p) => p.name)).size // de-dup by name (matches SourcesPane)
+  const count = memos.length + pdfCount + folderNotes.length
+  return (
+    <div className="dictly-anim-in mr-2 flex w-12 shrink-0 flex-col items-center gap-1.5 rounded-xl border border-black/5 bg-panel py-2.5 shadow-sm">
+      <button onClick={toggleCollapsed} className="rounded-lg p-1.5 text-subtle hover:bg-black/5" title="소스 펼치기">
+        <PanelLeftOpen size={17} />
+      </button>
+      <div className="my-0.5 h-px w-6 bg-black/10" />
+      <div
+        className="flex h-5 min-w-[20px] items-center justify-center rounded-full bg-accent/10 px-1 text-[10px] font-bold tabular-nums text-accent"
+        title={`소스 ${count}개`}
+      >
+        {count}
+      </div>
+      <div className="[writing-mode:vertical-rl] text-[10px] font-semibold uppercase tracking-wide text-subtle">소스</div>
+    </div>
+  )
+}
+
 function PreviewPane(): JSX.Element {
   const preview = useStore((s) => s.folderPreview)
   const memos = useStore((s) => s.memos)
   const folderNotes = useStore((s) => s.folderNotes)
+  const setPreviewCollapsed = useStore((s) => s.setFolderPreviewCollapsed)
   const title = preview
     ? preview.kind === 'memo'
       ? (memos.find((m) => m.id === preview.memoId)?.title ?? '전사문')
@@ -236,6 +268,10 @@ function PreviewPane(): JSX.Element {
             </span>
           </>
         )}
+        {!title && <div className="flex-1" />}
+        <button onClick={() => setPreviewCollapsed(true)} className="shrink-0 rounded p-1 text-subtle hover:bg-black/5 hover:text-ink" title="미리보기 닫기">
+          <X size={15} />
+        </button>
       </div>
       <div className="min-h-0 flex-1 overflow-hidden border-t border-black/5">
         {!preview ? (
@@ -261,19 +297,26 @@ export function FolderView(): JSX.Element {
   const selectedFolderId = useStore((s) => s.selectedFolderId)
   const studioFullscreen = useStore((s) => s.studioFullscreen)
   const studioCollapsed = useStore((s) => s.studioCollapsed)
+  const sourcesCollapsed = useStore((s) => s.folderSourcesCollapsed)
+  const previewCollapsed = useStore((s) => s.folderPreviewCollapsed)
+  const setPreviewCollapsed = useStore((s) => s.setFolderPreviewCollapsed)
   const renameFolder = useStore((s) => s.renameFolder)
   const folder = folders.find((f) => f.id === selectedFolderId)
   const [title, setTitle] = useState('')
   useEffect(() => setTitle(folder?.name ?? ''), [folder?.id, folder?.name])
 
   const studioOpen = !studioCollapsed
+  const showSrc = !sourcesCollapsed
+  const showPreview = !previewCollapsed
+  // guard against an empty PanelGroup (all three panes collapsed at once)
+  const anyPanel = showSrc || showPreview || studioOpen
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-canvas">
       <div className="flex h-12 shrink-0 items-center gap-2 px-4 pt-1">
         <FolderOpen size={16} className="shrink-0 text-subtle" />
         <input
-          className="min-w-[48px] max-w-[60%] bg-transparent text-[15px] font-semibold outline-none"
+          className="min-w-[48px] max-w-[52%] bg-transparent text-[15px] font-semibold outline-none"
           style={{ fieldSizing: 'content' } as React.CSSProperties}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -282,6 +325,20 @@ export function FolderView(): JSX.Element {
           title="폴더 이름 편집"
         />
         <span className="shrink-0 text-[12px] text-subtle">· 폴더</span>
+        <div className="flex-1" />
+        {!studioFullscreen && (
+          <button
+            onClick={() => setPreviewCollapsed(!previewCollapsed)}
+            className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[12px] font-medium shadow-sm transition ${
+              previewCollapsed
+                ? 'border-black/10 bg-panel text-subtle hover:bg-black/[0.03] hover:text-accent'
+                : 'border-accent/40 bg-accent/[0.06] text-accent'
+            }`}
+            title={previewCollapsed ? '미리보기 패널 열기' : '미리보기 패널 닫기'}
+          >
+            <Eye size={13} /> 미리보기
+          </button>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1 px-2 pb-2">
@@ -291,27 +348,38 @@ export function FolderView(): JSX.Element {
           </div>
         ) : (
           <>
-            <PanelGroup autoSaveId="folder.cols" direction="horizontal" className="min-w-0 flex-1">
-              <Panel key="src" id="src" order={1} defaultSize={26} minSize={16} className="min-h-0">
-                <div className={CARD}>
-                  <SourcesPane />
-                </div>
-              </Panel>
-              <ResizeHandle key="h-src" dir="h" />
-              <Panel key="preview" id="preview" order={2} defaultSize={44} minSize={24} className="min-h-0">
-                <div className={CARD}>
-                  <PreviewPane />
-                </div>
-              </Panel>
-              {studioOpen && <ResizeHandle key="h-studio" dir="h" />}
-              {studioOpen && (
-                <Panel key="studio" id="studio" order={3} defaultSize={30} minSize={18} className="min-h-0">
-                  <div className={`${CARD} dictly-anim-in`}>
-                    <StudioPanel />
-                  </div>
-                </Panel>
-              )}
-            </PanelGroup>
+            {sourcesCollapsed && <SourcesRail />}
+            {anyPanel ? (
+              <PanelGroup autoSaveId="folder.cols" direction="horizontal" className="min-w-0 flex-1">
+                {showSrc && (
+                  <Panel key="src" id="src" order={1} defaultSize={26} minSize={16} className="min-h-0">
+                    <div className={CARD}>
+                      <SourcesPane />
+                    </div>
+                  </Panel>
+                )}
+                {showSrc && (showPreview || studioOpen) && <ResizeHandle key="h-src" dir="h" />}
+                {showPreview && (
+                  <Panel key="preview" id="preview" order={2} defaultSize={44} minSize={24} className="min-h-0">
+                    <div className={CARD}>
+                      <PreviewPane />
+                    </div>
+                  </Panel>
+                )}
+                {showPreview && studioOpen && <ResizeHandle key="h-studio" dir="h" />}
+                {studioOpen && (
+                  <Panel key="studio" id="studio" order={3} defaultSize={30} minSize={18} className="min-h-0">
+                    <div className={`${CARD} dictly-anim-in`}>
+                      <StudioPanel />
+                    </div>
+                  </Panel>
+                )}
+              </PanelGroup>
+            ) : (
+              <div className="flex flex-1 items-center justify-center text-[12px] text-subtle">
+                모든 패널이 접혔어요 — 위 버튼으로 다시 펼치세요
+              </div>
+            )}
             {!studioOpen && <StudioRail />}
           </>
         )}

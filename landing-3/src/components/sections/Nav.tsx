@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Download } from 'lucide-react'
-import { DMG_URL, RELEASE_NOTES_URL } from '@/content'
+import { RELEASE_NOTES_URL } from '@/content'
+import { useLatestRelease } from '@/lib/release'
 import { cn, goToSetup } from '@/lib/utils'
 
 const links = [
@@ -12,6 +13,7 @@ const links = [
 ]
 
 export function Nav() {
+  const { primaryUrl } = useLatestRelease()
   const [stuck, setStuck] = useState(false)
   useEffect(() => {
     const on = () => setStuck(window.scrollY > 8)
@@ -45,7 +47,7 @@ export function Nav() {
           ))}
         </nav>
         <a
-          href={DMG_URL}
+          href={primaryUrl}
           onClick={goToSetup}
           className="inline-flex items-center gap-1.5 rounded-full bg-ink px-4 py-2 text-sm font-semibold text-white transition-transform hover:-translate-y-0.5"
         >

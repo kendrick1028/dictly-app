@@ -1,5 +1,5 @@
 import { dialog, shell } from 'electron'
-import { copyFile, readFile, writeFile, appendFile, unlink } from 'fs/promises'
+import { copyFile, readFile, writeFile, appendFile, unlink, stat } from 'fs/promises'
 import { existsSync, mkdirSync } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
@@ -69,6 +69,54 @@ export async function finalizeTake(
     setMemoAudio(memoId, takePath, durationSec)
     return takePath
   }
+}
+
+const IMPORT_EXTS = ['wav', 'mp3', 'm4a', 'aac', 'mp4', 'mov', 'webm', 'ogg', 'opus', 'flac', 'aiff', 'aif', 'caf', 'wma', 'amr', 'mkv', 'm4v']
+
+/**
+ * Import an existing recording for after-the-fact transcription. The file is converted with the
+ * bundled ffmpeg into (1) a raw 48k f32 mono take — the same format live recording writes, so
+ * `finalizeTake` appends it onto the memo's audio exactly like a new take — and (2) a 16k mono
+ * WAV the STT sidecar transcribes. Returns null when the user cancels.
+ */
+export async function importAudio(
+  memoId: number
+): Promise<{ takePath: string; wavPath: string; durationSec: number; name: string } | null> {
+  const res = await dialog.showOpenDialog({
+    title: '전사할 녹음 파일 선택',
+    properties: ['openFile'],
+    filters: [{ name: '오디오 / 동영상', extensions: IMPORT_EXTS }]
+  })
+  if (res.canceled || !res.filePaths[0]) return null
+  if (!ffmpegStatic) throw new Error('ffmpeg를 사용할 수 없어 파일을 변환할 수 없습니다')
+  const src = res.filePaths[0]
+  const stamp = Date.now()
+  const takePath = join(recordingsDir(), `take-${memoId}-${stamp}.pcm`)
+  const wavPath = join(recordingsDir(), `import-${memoId}-${stamp}.wav`)
+  try {
+    await execFileP(ffmpegStatic as string, [
+      '-y', '-i', src, '-vn',
+      // take: raw float32 48k mono (what finalizeTake expects)
+      '-map', '0:a:0', '-f', 'f32le', '-ar', '48000', '-ac', '1', takePath,
+      // sidecar input: 16k mono 16-bit WAV
+      '-map', '0:a:0', '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', wavPath
+    ])
+  } catch (err) {
+    await discardImport([takePath, wavPath])
+    throw new Error(`오디오 변환 실패: ${(err as Error).message.split('\n').slice(-2).join(' ').slice(0, 200)}`)
+  }
+  const { size } = await stat(takePath)
+  const durationSec = size / 4 / 48000
+  if (durationSec < 0.5) {
+    await discardImport([takePath, wavPath])
+    throw new Error('오디오 트랙을 찾지 못했거나 너무 짧습니다')
+  }
+  return { takePath, wavPath, durationSec, name: basename(src) }
+}
+
+/** Remove import scratch files (the 16k WAV after transcription, or both on failure). */
+export async function discardImport(paths: string[]): Promise<void> {
+  await Promise.all(paths.filter(Boolean).map((p) => unlink(p).catch(() => {})))
 }
 
 export async function readRecording(path: string): Promise<Uint8Array | null> {

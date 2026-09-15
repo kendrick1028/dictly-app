@@ -7,6 +7,8 @@ export interface Folder {
   createdAt: number
   /** starred for quick access on the dashboard */
   favorite?: boolean
+  /** archived (unused) — hidden from the sidebar folder list, kept with all its notes; restorable */
+  archived?: boolean
 }
 
 export interface MemoSummary {
@@ -34,6 +36,8 @@ export interface Segment {
   pdfId?: number | null
   /** 1-based PDF page visible when this chunk was transcribed (null/undefined = none) */
   pdfPage?: number | null
+  /** Korean translation of a foreign-language chunk, produced alongside live correction (null = none) */
+  translation?: string | null
 }
 
 /** A PDF attached to a note or a folder, viewable in-app. */
@@ -54,7 +58,7 @@ export interface PdfDoc {
 }
 
 // ---- PDF annotations (handwriting) ----
-export type AnnotationType = 'pen' | 'highlighter' | 'underline' | 'memo'
+export type AnnotationType = 'pen' | 'highlighter' | 'underline' | 'memo' | 'text'
 /** point normalized to page size: 0..1 of pageW / pageH (zoom & scroll independent) */
 export interface NPoint {
   x: number
@@ -89,6 +93,15 @@ export interface MemoData {
   y: number
   markdown: string
 }
+/** free text placed on the page (top-left anchored, normalized position) */
+export interface TextData {
+  x: number
+  y: number
+  text: string
+  /** font size normalized to pageW (px = size * pageW) */
+  size: number
+  color: string
+}
 
 export interface Annotation {
   /** STABLE local id (uuid for new, db-rowid string for loaded) — never changes; used as React key */
@@ -99,14 +112,14 @@ export interface Annotation {
   /** 1-based page */
   page: number
   type: AnnotationType
-  data: StrokeData | UnderlineData | MemoData
+  data: StrokeData | UnderlineData | MemoData | TextData
   /** linked audio moment in seconds (null = drawn while idle, no link) */
   tSec: number | null
   createdAt: number
 }
 
 // ---- Studio (NotebookLM-style generated artifacts) ----
-export type StudioKind = 'summary' | 'quiz' | 'mindmap' | 'flashcards' | 'table' | 'mnemonic' | 'feynman' | 'exam_radar'
+export type StudioKind = 'summary' | 'quiz' | 'mindmap' | 'flashcards' | 'table' | 'mnemonic' | 'feynman' | 'exam_radar' | 'tutor' | 'live_tutor'
 
 /** snapshot of the source manifest an item was generated from — survives PDF rename/delete */
 export interface StudioSourceMap {
@@ -180,6 +193,43 @@ export interface FeynmanContent {
   /** index into rounds[] of the round currently being taken / last viewed */
   currentRound: number
 }
+// ---- AI 튜터 (1:1 conversational tutor with progress/understanding tracking) ----
+export type TutorMode = 'learn' | 'sprint'
+export type TutorDifficulty = '하' | '중' | '중상' | '상'
+export interface TutorRoadmapItem {
+  id: string
+  label: string
+  status: 'pending' | 'active' | 'done'
+  /** per-concept understanding 0~100 (null = not assessed yet) */
+  understanding: number | null
+}
+export interface TutorTurn {
+  role: 'user' | 'assistant'
+  content: string
+  createdAt: number
+}
+/** one wrong-answer-note entry (오답노트) accumulated during the session */
+export interface TutorWrongNote {
+  concept: string
+  /** what the learner got wrong / the question */
+  problem: string
+  /** why the misconception is easy to make */
+  cause: string
+  /** the correct principle */
+  correct: string
+  /** same mistake made 2+ times → 🔴 */
+  repeated: boolean
+}
+export interface TutorContent {
+  mode: TutorMode
+  subject: string
+  roadmap: TutorRoadmapItem[]
+  turns: TutorTurn[]
+  difficulty: TutorDifficulty
+  stats: { asked: number; correct: number; partial: number; wrong: number }
+  wrongNotes: TutorWrongNote[]
+  status: 'active' | 'done'
+}
 // ---- Exam Radar (시험 레이더): concepts on a 중요도(X)×난이도(Y) quadrant map, with edges ----
 export interface ExamRadarNode {
   id: string
@@ -205,7 +255,26 @@ export interface ExamRadarContent {
   nodes: ExamRadarNode[]
   edges: ExamRadarEdge[]
 }
+// ---- 실시간 AI 튜터 (live ELI5 explainer cards, saved at the end of a recording) ----
+export interface LiveTutorCard {
+  id: string
+  /** transcript time span the explanation covers (seconds, memo timeline) */
+  tStart: number
+  tEnd: number
+  /** the transcript block that was explained */
+  sourceText: string
+  /** ELI5 explanation (markdown) */
+  md: string
+  /** 교안 page the tracker had at the time (null = no PDF / unknown) */
+  pdfPage: number | null
+  createdAt: number
+}
+export interface LiveTutorContent {
+  cards: LiveTutorCard[]
+  pdfName?: string
+}
 export type StudioContent =
+  | LiveTutorContent
   | SummaryContent
   | QuizContent
   | MindmapContent
@@ -214,6 +283,7 @@ export type StudioContent =
   | MnemonicContent
   | FeynmanContent
   | ExamRadarContent
+  | TutorContent
 
 export interface StudioItem {
   id: number
@@ -395,8 +465,10 @@ export interface HomeFolderStat {
   retention: number | null
 }
 
-/** an in-progress (unfinished) Feynman review surfaced on Home */
+/** an in-progress (unfinished) review surfaced on Home — Feynman round or AI 튜터 session */
 export interface HomeFeynmanInProgress {
+  /** which live session to resume (default 'feynman' for older payloads) */
+  kind?: 'feynman' | 'tutor'
   itemId: number
   memoId: number
   folderId: number | null
@@ -424,6 +496,34 @@ export interface HomeData {
   folders: HomeFolderStat[]
   feynmanInProgress: HomeFeynmanInProgress[]
   favorites: HomeFavorite[]
+  /** cloud API usage rows for the current calendar month (dashboard cost chart) */
+  apiUsage: ApiUsageRow[]
+}
+
+/** auto-update state pushed from the main process (GitHub Releases feed) */
+export type UpdateState =
+  | { state: 'idle' }
+  | { state: 'checking' }
+  | { state: 'available'; version: string }
+  | { state: 'downloading'; version: string; percent: number }
+  | { state: 'ready'; version: string }
+  | { state: 'none'; version: string }
+  | { state: 'error'; message: string }
+
+/** one billed cloud-API call/session (transcription engines), for the dashboard cost chart */
+export interface ApiUsageRow {
+  id?: number
+  /** epoch ms when the usage was recorded (session end) */
+  ts: number
+  /** 'meta' | 'openai' */
+  provider: string
+  /** 'live' | 'file' | 'preview' */
+  kind: string
+  audioSec: number
+  usd: number
+  /** true when the price is a list-price estimate rather than a billed figure */
+  estimate: boolean
+  memoId: number | null
 }
 
 /** a calendar event extracted from a recording (for the /일정 → .ics flow) */
@@ -483,7 +583,16 @@ export interface MemoChatSummary {
 }
 
 export type AudioSource = 'mic' | 'system'
-export type TranscribeModel = 'turbo' | 'large-v3'
+/** transcription engine: turbo (fast chunks) | large-v3 (accurate chunks) | live (Whisper Live streaming — text flows
+ *  while speaking) | meta (Meta Muse Voice Transcribe cloud — needs a Meta Model API key; glossary → vocabulary biasing) */
+export type TranscribeModel = 'turbo' | 'large-v3' | 'live' | 'meta'
+/** transcription language: fixed Korean / English, or per-utterance auto-detect */
+export type SttLanguage = 'ko' | 'en' | 'auto'
+export const STT_LANGUAGES: { id: SttLanguage; label: string }[] = [
+  { id: 'ko', label: '한국어' },
+  { id: 'en', label: 'English' },
+  { id: 'auto', label: '자동' }
+]
 
 /** Live message pushed from the STT sidecar over WebSocket. */
 export type SttServerMessage =
@@ -501,22 +610,45 @@ export type SttClientMessage =
   | { type: 'flush' }
   | { type: 'stop' }
   | { type: 'refine'; wavPath: string; model: TranscribeModel; language: string; initialPrompt: string }
+  /** whole-file transcription of an imported recording (16k mono WAV) */
+  | { type: 'transcribe_file'; wavPath: string; model: TranscribeModel; language: string; initialPrompt: string }
 
 export type ExportFormat = 'markdown' | 'text' | 'html' | 'pdf'
+
+/** who is signed in to a CLI (shown on the 연결 modal so the active account is obvious) */
+export interface CliAccount {
+  email: string | null
+  /** display name (Claude: displayName; Codex: none) */
+  name: string | null
+  /** plan / subscription label — Claude: max|pro|team|enterprise|free; Codex: plus|pro|team|free|api */
+  plan: string | null
+  /** organization / workspace name */
+  org: string | null
+  /** how the CLI is authenticated — claude.ai / console (API key) / chatgpt / apikey */
+  method: string | null
+}
 
 export interface ClaudeStatus {
   installed: boolean
   version: string | null
+  account?: CliAccount | null
 }
 
-export type AiEngine = 'claude' | 'gpt' | 'gemini'
+export type AiEngine = 'claude' | 'gpt' | 'gemini' | 'antigravity'
 /** how AI tasks reach the model: terminal CLIs vs direct HTTP APIs */
 export type ConnectionMode = 'cli' | 'api'
+
+/** one `agy models` row — slug (what --model takes) + display name */
+export interface AgyModel {
+  id: string
+  label: string
+}
 
 export interface ProviderStatus {
   installed: boolean
   loggedIn: boolean
   version: string | null
+  account?: CliAccount | null
 }
 
 export interface AiStatus {
@@ -524,6 +656,8 @@ export interface AiStatus {
   claude: ProviderStatus
   /** OpenAI Codex CLI (ChatGPT subscription) — optional engine for heavy tasks */
   gpt: ProviderStatus
+  /** Google Antigravity CLI (`agy`, Google 계정) — optional engine for heavy tasks */
+  antigravity: ProviderStatus
   /** CLI 연결 vs API 연결 */
   connectionMode: ConnectionMode
   /** which provider runs the heavy tasks (정리/요약/퀴즈/채팅) */
@@ -534,6 +668,10 @@ export interface AiStatus {
   gptReasoning: string
   /** Claude reasoning effort (low|medium|high|xhigh|max) — low = fastest */
   claudeEffort: string
+  /** Antigravity model slug (as `agy models` prints it; '' = the CLI's own default) */
+  agyModel: string
+  /** models `agy models` lists for the signed-in account (cached) */
+  agyModels: AgyModel[]
   /** whether each API key is saved (values never sent to renderer) */
   anthropicKeySet: boolean
   openaiKeySet: boolean
@@ -546,8 +684,41 @@ export interface AiStatus {
   transcribeEngine: string
   /** OpenAI transcription model id */
   transcribeModel: string
-  /** local Whisper model: turbo (fast) | large-v3 (most accurate) */
+  /** local Whisper model: turbo (fast) | large-v3 (most accurate) | live (streaming) */
   sttModel: TranscribeModel
+  /** transcription language (ko | en | auto) */
+  sttLanguage: SttLanguage
+  /** Meta Model API key saved (for the Meta transcription engine; value never sent to renderer) */
+  metaKeySet: boolean
+  /** live correction waits for this many FOLLOWING chunks before correcting a chunk (0 = correct immediately) */
+  correctFollowDelay: number
   /** overlay live preview via OpenAI Realtime while finals use the chosen engine */
   realtimePreview: boolean
+  /** sticky provider fallback in effect (primary hit a usage limit → tasks run on `to` until cleared) */
+  fallback: { from: string; to: string; since: number } | null
+}
+
+// ---- Notion export (internal integration token; 설정 → Notion 연결) ----
+export interface NotionTarget {
+  id: string
+  title: string
+  type: 'page' | 'database'
+  icon: string | null
+  url: string | null
+}
+export interface NotionStatus {
+  /** a token is saved (the value never reaches the renderer) */
+  tokenSet: boolean
+  workspace: string | null
+  botName: string | null
+  /** destination page/database new exports are created under */
+  parent: NotionTarget | null
+}
+export interface NotionExportPayload {
+  title: string
+  markdown: string
+  /** page icon emoji */
+  icon?: string
+  /** one-line provenance callout at the top ("Dictly 스튜디오 · 요약 · 소스 2개") */
+  subtitle?: string
 }

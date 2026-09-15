@@ -1,10 +1,10 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { getStroke } from 'perfect-freehand'
-import { Pencil, Play, Trash2, AudioLines } from 'lucide-react'
+import { Pencil, Play, Trash2, AudioLines, Minus, Plus } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import { MarkdownMath } from './MarkdownMath'
 import type { PDFDocumentProxy } from '../pdf/pdfjs-setup'
-import type { Annotation, NPoint, StrokeData, UnderlineData, MemoData } from '../../../shared/types'
+import type { Annotation, NPoint, StrokeData, UnderlineData, MemoData, TextData } from '../../../shared/types'
 
 // ---- helpers ----
 function getSvgPathFromStroke(stroke: number[][]): string {
@@ -109,6 +109,7 @@ export function PdfAnnotationLayer({ doc, pdfId, page, pageW, pageH }: Props): J
   const tool = useStore((s) => s.annTool)
   const color = useStore((s) => s.annColor)
   const width = useStore((s) => s.annWidth)
+  const textSize = useStore((s) => s.annTextSize)
   const ruler = useStore((s) => s.annRuler)
   const focusedPdfId = useStore((s) => s.focusedPdfId)
   const addAnn = useStore((s) => s.addAnnotationLocal)
@@ -216,6 +217,14 @@ export function PdfAnnotationLayer({ doc, pdfId, page, pageW, pageH }: Props): J
   const onPointerDown = (e: React.PointerEvent): void => {
     if (!drawing) return
     if (tool === 'memo') return // memo created on double-click only
+    if (tool === 'text') {
+      // text tool: a click on empty page places a text box and starts typing
+      e.preventDefault()
+      const p = ptOf(e)
+      const id = addAnn({ pdfId, page, type: 'text', data: { x: p.x, y: p.y, text: '', size: textSize, color } as TextData, tSec: captureTSec() })
+      setEditId(id)
+      return
+    }
     e.preventDefault()
     svgRef.current?.setPointerCapture(e.pointerId)
     const p = ptOf(e)
@@ -381,11 +390,14 @@ export function PdfAnnotationLayer({ doc, pdfId, page, pageW, pageH }: Props): J
       ? 'cursor-cell'
       : tool === 'lasso'
         ? 'cursor-crosshair'
-        : 'dictly-cursor-pen'
+        : tool === 'text'
+          ? 'cursor-text'
+          : 'dictly-cursor-pen'
     : ''
 
   const memos = anns.filter((a) => a.type === 'memo')
-  const strokes = anns.filter((a) => a.type !== 'memo')
+  const texts = anns.filter((a) => a.type === 'text')
+  const strokes = anns.filter((a) => a.type !== 'memo' && a.type !== 'text')
   const editStroke = editSel ? anns.find((a) => a.id === editSel) : null
   const editPts =
     editStroke && (editStroke.type === 'pen' || editStroke.type === 'highlighter')
@@ -479,6 +491,24 @@ export function PdfAnnotationLayer({ doc, pdfId, page, pageW, pageH }: Props): J
             </button>
           )
         })}
+
+      {/* free text boxes */}
+      {texts.map((a) => (
+        <TextBox
+          key={a.id}
+          a={a}
+          tool={tool}
+          pageW={pageW}
+          pageH={pageH}
+          editing={editId === a.id}
+          onEdit={() => setEditId(a.id)}
+          onEditDone={() => setEditId(null)}
+          onChange={(text) => updateAnn(a.id, { data: { ...(a.data as TextData), text } })}
+          onMove={(x, y) => updateAnn(a.id, { data: { ...(a.data as TextData), x, y } }, true)}
+          onResize={(size) => updateAnn(a.id, { data: { ...(a.data as TextData), size } })}
+          onDelete={() => deleteAnn(a.id)}
+        />
+      ))}
 
       {/* memo badges */}
       {memos.map((a) => (
@@ -616,6 +646,157 @@ function DraftShape({
 }
 
 // ---- memo badge ----
+const TEXT_MIN = 0.008
+const TEXT_MAX = 0.08
+
+/** free text on the page: type in place, drag to move, A−/A+ to resize (per box) */
+function TextBox({
+  a,
+  tool,
+  pageW,
+  pageH,
+  editing,
+  onEdit,
+  onEditDone,
+  onChange,
+  onMove,
+  onResize,
+  onDelete
+}: {
+  a: Annotation
+  tool: string
+  pageW: number
+  pageH: number
+  editing: boolean
+  onEdit: () => void
+  onEditDone: () => void
+  onChange: (text: string) => void
+  onMove: (x: number, y: number) => void
+  onResize: (size: number) => void
+  onDelete: () => void
+}): JSX.Element {
+  const d = a.data as TextData
+  const [draft, setDraft] = useState(d.text)
+  const [hovered, setHovered] = useState(false)
+  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null)
+  const movedRef = useRef(false)
+  const taRef = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => setDraft(d.text), [d.text, editing])
+  const fontPx = Math.max(8, d.size * pageW)
+  const interactive = tool === 'none' || tool === 'text' || tool === 'eraser'
+
+  // auto-grow the editor to its content
+  useEffect(() => {
+    const el = taRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = el.scrollHeight + 'px'
+    const longest = Math.max(4, ...draft.split('\n').map((l) => l.length))
+    el.style.width = Math.min(pageW * 0.9, Math.max(120, longest * fontPx * 0.62 + 16)) + 'px'
+  }, [draft, editing, fontPx, pageW])
+
+  const onDown = (e: React.PointerEvent): void => {
+    if (tool === 'eraser') {
+      onDelete()
+      return
+    }
+    if (tool !== 'none' && tool !== 'text') return
+    e.stopPropagation()
+    movedRef.current = false
+    const layerEl = (e.currentTarget as HTMLElement).closest('[data-annlayer]') as HTMLElement | null
+    if (!layerEl) return
+    const parent = layerEl.getBoundingClientRect()
+    const off = { x: e.clientX - parent.left - d.x * parent.width, y: e.clientY - parent.top - d.y * parent.height }
+    ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+    let last: { x: number; y: number } | null = null
+    const move = (ev: PointerEvent): void => {
+      movedRef.current = true
+      last = {
+        x: Math.max(0, Math.min(1, (ev.clientX - parent.left - off.x) / parent.width)),
+        y: Math.max(0, Math.min(1, (ev.clientY - parent.top - off.y) / parent.height))
+      }
+      setDragPos(last)
+    }
+    const up = (): void => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      if (last) onMove(last.x, last.y)
+      setDragPos(null)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+  }
+  const finish = (): void => {
+    const t = draft.trim()
+    if (!t) onDelete() // empty box → gone (also cleans up a mis-click)
+    else if (t !== d.text) onChange(draft)
+    onEditDone()
+  }
+  const step = (dir: 1 | -1): void => onResize(Math.max(TEXT_MIN, Math.min(TEXT_MAX, d.size * (dir > 0 ? 1.2 : 1 / 1.2))))
+
+  return (
+    <div
+      data-memobadge=""
+      className="absolute"
+      style={{ left: (dragPos?.x ?? d.x) * pageW, top: (dragPos?.y ?? d.y) * pageH, pointerEvents: interactive ? 'auto' : 'none' }}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+    >
+      {/* per-box size + delete controls (while editing or hovered with the text tool) */}
+      {(editing || (hovered && tool === 'text')) && (
+        <div className="absolute -top-7 left-0 z-[60] flex items-center gap-0.5 rounded-lg border border-black/10 bg-white px-1 py-0.5 shadow-lg" onPointerDown={(e) => e.stopPropagation()}>
+          <button onMouseDown={(e) => e.preventDefault()} onClick={() => step(-1)} className="rounded p-0.5 text-subtle hover:bg-black/5" title="글자 작게">
+            <Minus size={11} />
+          </button>
+          <span className="w-9 text-center text-[10px] tabular-nums text-subtle">{Math.round(fontPx)}px</span>
+          <button onMouseDown={(e) => e.preventDefault()} onClick={() => step(1)} className="rounded p-0.5 text-subtle hover:bg-black/5" title="글자 크게">
+            <Plus size={11} />
+          </button>
+          <span className="mx-0.5 h-3 w-px bg-black/10" />
+          <button onMouseDown={(e) => e.preventDefault()} onClick={onDelete} className="rounded p-0.5 text-subtle hover:bg-red-50 hover:text-red-500" title="삭제">
+            <Trash2 size={11} />
+          </button>
+        </div>
+      )}
+      {editing ? (
+        <textarea
+          ref={taRef}
+          value={draft}
+          autoFocus
+          rows={1}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={finish}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              finish()
+            }
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          placeholder="텍스트 입력"
+          style={{ fontSize: fontPx, color: d.color, lineHeight: 1.3 }}
+          className="block resize-none overflow-hidden rounded bg-white/85 px-1 py-0.5 font-sans outline-none ring-1 ring-accent"
+        />
+      ) : (
+        <div
+          onPointerDown={onDown}
+          onClick={() => {
+            if (movedRef.current) return
+            if (tool === 'text') onEdit()
+          }}
+          onDoubleClick={() => tool === 'none' && onEdit()}
+          style={{ fontSize: fontPx, color: d.color, lineHeight: 1.3, whiteSpace: 'pre-wrap', maxWidth: pageW * 0.9 }}
+          className={`select-none rounded px-1 py-0.5 ${tool === 'text' ? 'cursor-move ring-1 ring-dashed ring-accent/40 hover:ring-accent' : tool === 'none' ? 'cursor-move' : ''}`}
+          title={tool === 'none' ? '드래그로 이동 · 더블클릭으로 편집' : '클릭해서 편집 · 드래그로 이동'}
+        >
+          {d.text}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function MemoBadge({
   a,
   tool,

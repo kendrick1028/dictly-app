@@ -5,12 +5,16 @@ import { registerIpc } from './ipc'
 import { setupAudioLoopback } from './audioLoopback'
 import { stopSidecar } from './sttSidecar'
 import { startScheduler } from './scheduler'
+import { setupUpdater } from './updater'
 
 // Enable Chromium system-audio loopback (macOS 13+ / CoreAudio tap on 15+).
-app.commandLine.appendSwitch(
-  'enable-features',
-  'MacLoopbackAudioForScreenShare,MacCatapSystemAudioLoopbackCapture,MacSckSystemAudioLoopbackOverride'
-)
+// Windows gets loopback (WASAPI) through the same desktopCapturer 'loopback' path without flags.
+if (process.platform === 'darwin') {
+  app.commandLine.appendSwitch(
+    'enable-features',
+    'MacLoopbackAudioForScreenShare,MacCatapSystemAudioLoopbackCapture,MacSckSystemAudioLoopbackOverride'
+  )
+}
 
 let mainWindow: BrowserWindow | null = null
 
@@ -23,6 +27,8 @@ function createWindow(): void {
     show: false,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
+    // Windows has no traffic lights: draw the native min/max/close overlay on the drag strip instead
+    ...(process.platform === 'win32' ? { titleBarOverlay: { color: '#f3f3f1', symbolColor: '#3a3a38', height: 40 } } : {}),
     backgroundColor: '#f3f3f1',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -66,7 +72,10 @@ app.whenReady().then(() => {
   registerIpc()
   setupAudioLoopback()
   createWindow()
-  if (mainWindow) startScheduler(mainWindow)
+  if (mainWindow) {
+    startScheduler(mainWindow)
+    setupUpdater(mainWindow) // GitHub Releases auto-update (kendrick1028/dictly-app)
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

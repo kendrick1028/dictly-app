@@ -1,11 +1,13 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { Pause, Play, Loader2, Wand2, Bold, Underline, Highlighter, FileText, Bookmark, ChevronUp, ChevronDown, X, Search, History } from 'lucide-react'
+import { memo, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
+import { Pause, Play, Loader2, Wand2, Bold, Underline, Highlighter, FileText, Bookmark, ChevronUp, ChevronDown, X, Search, History, ExternalLink, Trash2 } from 'lucide-react'
 import { useStore } from '../../store/useStore'
 import { MarkdownMath } from '../MarkdownMath'
 import { applyMathRules, segmentsToMarkdown } from '../../math/koMathRules'
 import { fmtClock, fmtRange } from '../../lib/time'
 import { addRuntimeReplacement, markLiveEdited } from '../../audio/recorderController'
 import { isHeading } from '../../lib/structure'
+import { useStickToBottom, JumpToLatest } from '../../lib/useStickToBottom'
 import type { Segment } from '../../../../shared/types'
 
 function TypingDots(): JSX.Element {
@@ -28,7 +30,7 @@ const CORR_DUR = 3.2
  * recording/paused). The preview updates ~2x/s; keeping it here means those updates re-render
  * just this one line, not the whole (potentially huge) segment list above it.
  */
-function LivePreviewLine({ show }: { show: boolean }): JSX.Element | null {
+function LivePreviewLine({ show, follow }: { show: boolean; follow: RefObject<boolean> }): JSX.Element | null {
   const partial = useStore((s) => s.rec.partial)
   const isRecording = useStore((s) => s.rec.isRecording)
   const paused = useStore((s) => s.rec.paused)
@@ -36,8 +38,9 @@ function LivePreviewLine({ show }: { show: boolean }): JSX.Element | null {
   useEffect(() => {
     // instant (not 'smooth'): repeated smooth scrollIntoView on every partial piles up
     // animations that starve the waveform's rAF and make the preview flicker.
-    if (partial) ref.current?.scrollIntoView({ block: 'end' })
-  }, [partial])
+    // `follow` is false while the user has scrolled up to read — never yank them back down.
+    if (partial && follow.current) ref.current?.scrollIntoView({ block: 'end' })
+  }, [partial, follow])
   if (!show || !isRecording || paused) return null
   return (
     // dots on their OWN line (not inline after the text) so they stay fixed at the bottom-left
@@ -131,6 +134,8 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
   const taRef = useRef<HTMLTextAreaElement>(null)
   const toolbarRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
+  // auto-follow new chunks; pauses when the user scrolls up, resumes via the ↓ button / bottom
+  const { following, followRef, scrollToBottom } = useStickToBottom(contentRef)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [curTime, setCurTime] = useState(0)
@@ -217,8 +222,8 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
   useEffect(() => {
     // scroll on NEW segments only (partial-driven scrolling lives in LivePreviewLine, so it
     // no longer thrashes layout on every preview tick)
-    if (live && editIdx === null) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
-  }, [segments.length, live, editIdx])
+    if (live && editIdx === null && followRef.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [segments.length, live, editIdx, followRef])
 
   // jump to a cited source — by quote (folder-chat badges) or by time (studio citation chips) — and flash it
   useEffect(() => {
@@ -336,6 +341,36 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
     openPdf(pdfId)
     setFocusedPdf(pdfId)
     setCurrentPdfPage(pdfId, page)
+  }
+  // p.N badge dropdown: jump / re-tag this chunk to another page / clear the tag
+  const [pageMenu, setPageMenu] = useState<{ idx: number; left: number; top: number } | null>(null)
+  const pageMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!pageMenu) return
+    const h = (e: MouseEvent): void => {
+      if (pageMenuRef.current && !pageMenuRef.current.contains(e.target as Node)) setPageMenu(null)
+    }
+    const k = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') setPageMenu(null)
+    }
+    document.addEventListener('mousedown', h)
+    window.addEventListener('keydown', k)
+    return () => {
+      document.removeEventListener('mousedown', h)
+      window.removeEventListener('keydown', k)
+    }
+  }, [pageMenu])
+  const retagSegment = async (idx: number, page: number | null): Promise<void> => {
+    if (!memo) return
+    const seg = segments[idx]
+    if (!seg) return
+    const mc = memo.segments.length
+    if (idx < mc) {
+      const newSegs = memo.segments.map((x, i) => (i === idx ? { ...x, pdfPage: page, pdfId: page == null ? null : x.pdfId } : x))
+      await saveTranscript(segmentsToMarkdown(newSegs, mathRules, replacements), newSegs)
+    } else {
+      useStore.getState().setLiveSegmentPage(idx - mc, page == null ? null : (seg.pdfId ?? null), page)
+    }
   }
   const togglePlay = (): void => {
     const a = audioRef.current
@@ -537,7 +572,9 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
         </div>
       </div>
 
-      <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto px-4 pb-6">
+      <div className="relative min-h-0 flex-1">
+      {/* extra bottom padding: the floating recording pill overlaps the last lines otherwise */}
+      <div ref={contentRef} className="absolute inset-0 overflow-y-auto px-4 pb-28">
         {isRecordingThis && finalizing && (
           <div className="sticky top-0 z-10 mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-700 shadow-sm">
             <Loader2 size={14} className="animate-spin" /> 남은 음성 전사·교정 마무리 중…
@@ -569,16 +606,25 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
                       {fmtRange(s.tStart, s.tEnd)}
                     </button>
                     {s.pdfId != null && s.pdfPage != null && (
-                      <span className="group/pdf relative inline-flex">
+                      // left half jumps the PDF to the page; the ⌄ opens the re-tag dropdown
+                      <span className={`inline-flex items-stretch overflow-hidden rounded text-[10px] text-accent ${pageMenu?.idx === i ? 'bg-accent/20' : 'bg-accent/10'}`}>
                         <button
                           onClick={() => openPdfToPage(s.pdfId as number, s.pdfPage as number)}
-                          className="flex items-center gap-0.5 rounded bg-accent/10 px-1.5 text-[10px] text-accent hover:bg-accent/20"
+                          className="flex items-center gap-0.5 pl-1.5 pr-1 hover:bg-accent/20"
+                          title={`${memo.pdfs.find((p) => p.id === s.pdfId)?.name ?? 'PDF'} · p.${s.pdfPage} — 클릭하면 이 페이지로 이동`}
                         >
                           <FileText size={9} /> p.{s.pdfPage}
                         </button>
-                        <span className="pointer-events-none absolute bottom-full left-0 z-[70] mb-1 hidden whitespace-nowrap rounded-md bg-white px-2 py-1 text-[10px] font-normal text-ink shadow-lg ring-1 ring-black/10 group-hover/pdf:block">
-                          {memo.pdfs.find((p) => p.id === s.pdfId)?.name ?? 'PDF'} · p.{s.pdfPage}
-                        </span>
+                        <button
+                          onClick={(e) => {
+                            const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                            setPageMenu((cur) => (cur?.idx === i ? null : { idx: i, left: r.left - 60, top: r.bottom + 4 }))
+                          }}
+                          className="flex items-center border-l border-accent/20 px-1 hover:bg-accent/20"
+                          title="페이지 바꾸기"
+                        >
+                          <ChevronDown size={9} className="opacity-70" />
+                        </button>
                       </span>
                     )}
                     <div className="flex-1" />
@@ -643,15 +689,78 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
                       highlight={searchOpen && searchQuery.trim() && matchSet.has(i) ? searchQuery.trim() : undefined}
                       active={i === activeMatchSeg}
                     />
+                    {s.translation && (
+                      // Korean translation of a foreign-language chunk (from live correction) — shown under the original
+                      <div className="mt-1 border-l-2 border-accent/30 pl-2.5 text-[13.5px] leading-relaxed text-subtle">
+                        <MarkdownMath className="!text-[13.5px] [&_p]:!my-0">{s.translation}</MarkdownMath>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
             )
           })}
-          <LivePreviewLine show={isRecordingThis} />
+          <LivePreviewLine show={isRecordingThis} follow={followRef} />
           <div ref={bottomRef} />
         </div>
       </div>
+      {live && !following && <JumpToLatest onClick={scrollToBottom} />}
+      </div>
+
+      {/* p.N badge dropdown */}
+      {pageMenu &&
+        (() => {
+          const seg = segments[pageMenu.idx]
+          if (!seg || seg.pdfId == null) return null
+          const pdf = memo.pdfs.find((p) => p.id === seg.pdfId)
+          const count = pdf?.pageCount ?? 0
+          const W = 224
+          const left = Math.max(8, Math.min(window.innerWidth - W - 8, pageMenu.left))
+          const top = Math.min(window.innerHeight - 300, pageMenu.top)
+          return createPortal(
+            <div ref={pageMenuRef} className="dictly-pop-in fixed z-[80] w-56 rounded-xl border border-black/10 bg-white py-1.5 shadow-xl" style={{ left, top }}>
+              <div className="truncate px-3 pb-1 text-[10.5px] text-subtle" title={pdf?.name}>
+                {pdf?.name ?? 'PDF'} · 이 청크의 교안 페이지
+              </div>
+              <button
+                onClick={() => {
+                  openPdfToPage(seg.pdfId as number, seg.pdfPage as number)
+                  setPageMenu(null)
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink hover:bg-black/5"
+              >
+                <ExternalLink size={12} className="text-accent" /> p.{seg.pdfPage}로 이동
+              </button>
+              <div className="my-1 h-px bg-black/5" />
+              <div className="px-3 pb-1 text-[10.5px] text-subtle">페이지 바꾸기</div>
+              <div className="mx-2 grid max-h-40 grid-cols-6 gap-1 overflow-y-auto pb-1">
+                {Array.from({ length: Math.max(count, seg.pdfPage ?? 1) }, (_, k) => k + 1).map((pg) => (
+                  <button
+                    key={pg}
+                    onClick={() => {
+                      void retagSegment(pageMenu.idx, pg)
+                      setPageMenu(null)
+                    }}
+                    className={`rounded-md py-1 text-[11px] tabular-nums ${pg === seg.pdfPage ? 'bg-accent font-semibold text-white' : 'bg-black/[0.04] text-ink hover:bg-accent/15 hover:text-accent'}`}
+                  >
+                    {pg}
+                  </button>
+                ))}
+              </div>
+              <div className="my-1 h-px bg-black/5" />
+              <button
+                onClick={() => {
+                  void retagSegment(pageMenu.idx, null)
+                  setPageMenu(null)
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-red-500 hover:bg-red-50"
+              >
+                <Trash2 size={12} /> 페이지 태그 지우기
+              </button>
+            </div>,
+            document.body
+          )
+        })()}
 
       {/* edit-mode selection toolbar */}
       {editIdx !== null && editSel && (

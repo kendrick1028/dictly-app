@@ -1,7 +1,8 @@
 // Home-screen data aggregation (main process): timetable, schedule store, per-folder study time,
-// Ebbinghaus retention estimate (boosted by Feynman review scores), and in-progress Feynman reviews.
+// Ebbinghaus retention estimate (boosted by Feynman review scores), and in-progress reviews
+// (Feynman rounds + AI 튜터 sessions).
 import * as db from './db'
-import type { FeynmanContent, HomeData, HomeFeynmanInProgress, HomeFolderStat } from '../shared/types'
+import type { FeynmanContent, HomeData, HomeFeynmanInProgress, HomeFolderStat, TutorContent } from '../shared/types'
 
 const DAY = 86_400_000
 
@@ -15,7 +16,9 @@ export function computeHomeData(): HomeData {
   const now = Date.now()
   const folders = db.listFolders()
   const memos = db.listAllMemos()
-  const studio = db.listAllStudio().filter((s) => s.kind === 'feynman')
+  const allStudio = db.listAllStudio()
+  const studio = allStudio.filter((s) => s.kind === 'feynman')
+  const tutors = allStudio.filter((s) => s.kind === 'tutor')
   const memoFolder = new Map<number, number | null>(memos.map((m) => [m.id, m.folderId]))
 
   type Acc = { studySec: number; lastActivity: number | null; fCount: number; fScoreSum: number; lastReview: number | null }
@@ -47,6 +50,7 @@ export function computeHomeData(): HomeData {
         }
       } else if (r.status === 'active') {
         inProgress.push({
+          kind: 'feynman',
           itemId: it.id,
           memoId: it.memoId,
           folderId,
@@ -57,6 +61,24 @@ export function computeHomeData(): HomeData {
         })
       }
     }
+  }
+
+  // in-progress AI 튜터 sessions surface alongside Feynman reviews (진도 = done concepts / roadmap)
+  for (const it of tutors) {
+    const c = it.content as TutorContent
+    if (!c || c.status !== 'active') continue
+    const roadmap = Array.isArray(c.roadmap) ? c.roadmap : []
+    const scored = roadmap.filter((r) => r.understanding != null)
+    inProgress.push({
+      kind: 'tutor',
+      itemId: it.id,
+      memoId: it.memoId,
+      folderId: it.folderId ?? memoFolder.get(it.memoId) ?? null,
+      title: it.title,
+      answered: roadmap.filter((r) => r.status === 'done').length,
+      total: roadmap.length,
+      lastScore: scored.length ? Math.round(scored.reduce((s, r) => s + (r.understanding ?? 0), 0) / scored.length) : null
+    })
   }
 
   const folderStats: HomeFolderStat[] = folders.map((f) => {
@@ -102,6 +124,12 @@ export function computeHomeData(): HomeData {
     events: db.listScheduleEvents(),
     folders: folderStats,
     feynmanInProgress: inProgress,
-    favorites
+    favorites,
+    apiUsage: (() => {
+      const now = new Date()
+      const from = new Date(now.getFullYear(), now.getMonth(), 1).getTime()
+      const to = new Date(now.getFullYear(), now.getMonth() + 1, 1).getTime()
+      return db.listApiUsage(from, to)
+    })()
   }
 }

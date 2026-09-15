@@ -1,6 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Check, ChevronDown } from 'lucide-react'
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
+import { Check, ChevronDown, Mic, Monitor, Sparkles, Users } from 'lucide-react'
 import { useStore } from '../store/useStore'
+
+/** When true, pill dropdowns collapse to icon-only (set by the record bar when it gets narrow). */
+const CompactCtx = createContext(false)
+export function PillCompactProvider({ compact, children }: { compact: boolean; children: ReactNode }): JSX.Element {
+  return <CompactCtx.Provider value={compact}>{children}</CompactCtx.Provider>
+}
 
 export const CLAUDE_MODELS = [
   { id: 'claude-opus-4-8', label: 'Opus 4.8' },
@@ -30,8 +36,24 @@ const CLAUDE_EFFORT = [
   { id: 'max', label: 'Max' }
 ]
 
-/** Custom popover dropdown that opens upward (used in the bottom pill / chat bar). */
-function Dropdown({ label, children }: { label: string; children: (close: () => void) => ReactNode }): JSX.Element {
+/** Label of the model the current engine will answer with (record pill's second line while recording). */
+export function useModelLabel(): string {
+  const aiEngine = useStore((s) => s.aiEngine)
+  const claudeModel = useStore((s) => s.claudeModel)
+  const gptModel = useStore((s) => s.gptModel)
+  const agyModel = useStore((s) => s.agyModel)
+  const agyModels = useStore((s) => s.agyModels)
+  if (aiEngine === 'antigravity') return agyModels.find((m) => m.id === agyModel)?.label ?? (agyModel || 'Antigravity')
+  const isGpt = aiEngine === 'gpt'
+  const models = isGpt ? GPT_MODELS : CLAUDE_MODELS
+  return models.find((m) => m.id === (isGpt ? gptModel : claudeModel))?.label ?? (isGpt ? 'GPT' : 'Claude')
+}
+
+/** Custom popover dropdown that opens upward (used in the bottom pill / chat bar). The trigger is
+ *  borderless (icon · label · ⌄ with a hover tint) so it doesn't nest a second rounded outline
+ *  inside the pill. In compact mode (narrow record bar) the label animates away, icon only. */
+function Dropdown({ label, icon, children }: { label: string; icon?: ReactNode; children: (close: () => void) => ReactNode }): JSX.Element {
+  const compact = useContext(CompactCtx) && !!icon
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
@@ -46,10 +68,17 @@ function Dropdown({ label, children }: { label: string; children: (close: () => 
     <div className="relative" ref={ref}>
       <button
         onClick={() => setOpen((v) => !v)}
-        className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-[12px] transition ${open ? 'border-accent bg-accent/5' : 'border-black/10 bg-white hover:bg-black/[0.03]'}`}
+        title={compact ? label : undefined}
+        className={`flex items-center rounded-lg text-[12.5px] text-ink transition-all duration-200 hover:bg-black/[0.04] ${
+          open ? 'bg-black/5' : ''
+        } ${compact ? 'gap-0 px-2 py-[7px]' : 'gap-1.5 px-2.5 py-[7px]'}`}
       >
-        <span className="max-w-[120px] truncate">{label}</span>
-        <ChevronDown size={13} className="text-subtle" />
+        {icon && <span className="flex shrink-0 items-center text-subtle">{icon}</span>}
+        <span className={`truncate transition-all duration-200 ${compact ? 'max-w-0 opacity-0' : 'max-w-[110px] opacity-100'}`}>{label}</span>
+        {/* chevron collapses away in compact mode → icon only */}
+        <span className={`overflow-hidden transition-all duration-200 ${compact ? 'max-w-0 opacity-0' : 'max-w-[14px] opacity-100'}`}>
+          <ChevronDown size={12} className="text-subtle" />
+        </span>
       </button>
       {open && (
         <div className="absolute bottom-full left-0 z-30 mb-2 w-52 overflow-hidden rounded-xl border border-black/10 bg-white py-1 shadow-xl">
@@ -78,15 +107,18 @@ function SectionLabel({ children }: { children: ReactNode }): JSX.Element {
 
 /** Input source picker: 시스템 / 마이크. */
 export function SourceMenu(): JSX.Element {
-  const { rec, setRec } = useStore()
+  const { rec, setAudioSource } = useStore()
   return (
-    <Dropdown label={rec.source === 'system' ? '시스템' : '마이크'}>
+    <Dropdown
+      label={rec.source === 'system' ? '시스템' : '마이크'}
+      icon={rec.source === 'system' ? <Monitor size={14} /> : <Mic size={14} />}
+    >
       {(close) => (
         <>
-          <Row active={rec.source === 'system'} onClick={() => { setRec({ source: 'system' }); close() }}>
+          <Row active={rec.source === 'system'} onClick={() => { void setAudioSource('system'); close() }}>
             시스템
           </Row>
-          <Row active={rec.source === 'mic'} onClick={() => { setRec({ source: 'mic' }); close() }}>
+          <Row active={rec.source === 'mic'} onClick={() => { void setAudioSource('mic'); close() }}>
             마이크
           </Row>
         </>
@@ -105,7 +137,7 @@ export function AgentMenu(): JSX.Element {
   const curId = memoAgentId ?? activeAgentId
   const curLabel = agents.find((a) => a.id === curId)?.name ?? '에이전트 없음'
   return (
-    <Dropdown label={curLabel}>
+    <Dropdown label={curLabel} icon={<Users size={14} />}>
       {(close) => (
         <>
           <SectionLabel>에이전트 (키워드)</SectionLabel>
@@ -127,14 +159,34 @@ export function AgentMenu(): JSX.Element {
 
 /** Engine-aware model picker + provider speed control (Claude: 작업량/effort / GPT: 추론 강도). */
 export function ModelMenu(): JSX.Element {
-  const { aiEngine, claudeModel, setClaudeModel, gptModel, setGptModel, gptReasoning, setGptReasoning, claudeEffort, setClaudeEffort } =
+  const { aiEngine, claudeModel, setClaudeModel, gptModel, setGptModel, gptReasoning, setGptReasoning, claudeEffort, setClaudeEffort, agyModel, agyModels, setAgyModel } =
     useStore()
+  if (aiEngine === 'antigravity') {
+    // Antigravity: the CLI lists its models by display name (effort is part of the name, e.g. "(Low)")
+    return (
+      <Dropdown label={agyModels.find((m) => m.id === agyModel)?.label ?? (agyModel || 'Antigravity 기본')} icon={<Sparkles size={14} />}>
+        {(close) => (
+          <>
+            <SectionLabel>모델 (Antigravity)</SectionLabel>
+            <Row active={!agyModel} onClick={() => { void setAgyModel(''); close() }}>
+              CLI 기본 모델
+            </Row>
+            {agyModels.map((m) => (
+              <Row key={m.id} active={agyModel === m.id} onClick={() => { void setAgyModel(m.id); close() }}>
+                {m.label}
+              </Row>
+            ))}
+          </>
+        )}
+      </Dropdown>
+    )
+  }
   const isGpt = aiEngine === 'gpt'
   const models = isGpt ? GPT_MODELS : CLAUDE_MODELS
   const curId = isGpt ? gptModel : claudeModel
   const curLabel = models.find((m) => m.id === curId)?.label ?? (isGpt ? 'GPT' : 'Claude')
   return (
-    <Dropdown label={curLabel}>
+    <Dropdown label={curLabel} icon={<Sparkles size={14} />}>
       {(close) => (
         <>
           <SectionLabel>모델</SectionLabel>

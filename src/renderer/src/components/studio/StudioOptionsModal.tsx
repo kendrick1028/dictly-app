@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Check, ChevronDown, ChevronRight as ChevronRightIcon } from 'lucide-react'
 import { kindMeta } from './studioMeta'
+import { useStore } from '../../store/useStore'
 import type { StudioKind } from '../../../../shared/types'
 
 export interface StudioOptions {
@@ -15,6 +16,9 @@ export interface StudioOptions {
   cardCount?: number
   focus?: 'concept' | 'formula' | 'mixed'
   techniques?: string[]
+  // AI 튜터
+  tutorMode?: 'learn' | 'sprint'
+  subject?: string
 }
 
 const QUIZ_TYPES = [
@@ -132,6 +136,14 @@ export function StudioOptionsModal({
   const [techniques, setTechniques] = useState<string[]>([...TECHS])
   const [customOpen, setCustomOpen] = useState(false)
   const [custom, setCustom] = useState('')
+  // AI 튜터: 모드 + 과목명 (기본값 — 폴더명, 없으면 노트 제목)
+  const [tutorMode, setTutorMode] = useState<'learn' | 'sprint'>('learn')
+  const [subject, setSubject] = useState(() => {
+    const st = useStore.getState()
+    if (st.studioScope === 'folder') return st.folders.find((f) => f.id === st.selectedFolderId)?.name ?? ''
+    const folderName = st.memo?.folderId != null ? st.folders.find((f) => f.id === st.memo?.folderId)?.name : undefined
+    return folderName ?? st.memo?.title ?? ''
+  })
 
   const create = (): void => {
     const opts: StudioOptions = { custom: custom.trim() || undefined }
@@ -141,6 +153,7 @@ export function StudioOptionsModal({
     if (kind === 'mindmap') opts.direction = direction
     if (kind === 'flashcards') Object.assign(opts, { cardCount, focus })
     if (kind === 'mnemonic') opts.techniques = techniques.length ? techniques : [...TECHS]
+    if (kind === 'tutor') Object.assign(opts, { tutorMode, subject: subject.trim() })
     onCreate(kind, opts)
   }
 
@@ -225,6 +238,38 @@ export function StudioOptionsModal({
 
           {kind === 'table' && <div className="rounded-xl bg-black/[0.03] px-3 py-2.5 text-[12px] text-subtle">맥락 단위로 여러 개의 정리 표를 자동 구성해요.</div>}
 
+          {kind === 'tutor' && (
+            <>
+              <Row label="모드">
+                <div className="grid w-full grid-cols-2 gap-2">
+                  <OptCard
+                    active={tutorMode === 'learn'}
+                    label="학습 모드"
+                    desc="개념 하나씩 차근차근 · 난이도 자동 조절"
+                    onClick={() => setTutorMode('learn')}
+                  />
+                  <OptCard
+                    active={tutorMode === 'sprint'}
+                    label="시험 직전 스프린트"
+                    desc="설명 최소화 · 실전 문제 연사"
+                    onClick={() => setTutorMode('sprint')}
+                  />
+                </div>
+              </Row>
+              <Row label="과목명">
+                <input
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  placeholder="예: 원가회계"
+                  className="w-full rounded-xl border border-black/10 bg-white px-3 py-2 text-[13px] text-ink outline-none focus:border-accent"
+                />
+              </Row>
+              <div className="rounded-xl bg-black/[0.03] px-3 py-2.5 text-[12px] leading-relaxed text-subtle">
+                소스 자료 전체를 1:1 수업으로 빠짐없이 배워요. 한 개념씩 설명 → 확인 질문으로 진행하고, 진도·이해도가 실시간으로 표시돼요. 틀린 개념은 오답노트로 정리됩니다.
+              </div>
+            </>
+          )}
+
           {kind === 'mnemonic' && (
             <Row label="암기 기법 (복수 선택)">
               {TECHS.map((t) => {
@@ -244,20 +289,22 @@ export function StudioOptionsModal({
             </Row>
           )}
 
-          <div>
-            <button onClick={() => setCustomOpen((v) => !v)} className="flex items-center gap-1 text-[12px] font-medium text-subtle hover:text-ink">
-              {customOpen ? <ChevronDown size={13} /> : <ChevronRightIcon size={13} />} 직접 만들기 (추가 지시)
-            </button>
-            {customOpen && (
-              <textarea
-                value={custom}
-                onChange={(e) => setCustom(e.target.value)}
-                rows={3}
-                placeholder="구조, 스타일, 어조 등을 지정하세요…"
-                className="mt-2 w-full resize-none rounded-xl border border-black/10 px-3 py-2 text-[13px] outline-none focus:border-accent"
-              />
-            )}
-          </div>
+          {kind !== 'tutor' && (
+            <div>
+              <button onClick={() => setCustomOpen((v) => !v)} className="flex items-center gap-1 text-[12px] font-medium text-subtle hover:text-ink">
+                {customOpen ? <ChevronDown size={13} /> : <ChevronRightIcon size={13} />} 직접 만들기 (추가 지시)
+              </button>
+              {customOpen && (
+                <textarea
+                  value={custom}
+                  onChange={(e) => setCustom(e.target.value)}
+                  rows={3}
+                  placeholder="구조, 스타일, 어조 등을 지정하세요…"
+                  className="mt-2 w-full resize-none rounded-xl border border-black/10 px-3 py-2 text-[13px] outline-none focus:border-accent"
+                />
+              )}
+            </div>
+          )}
         </div>
 
         <div className="mt-5 flex justify-end gap-2">
@@ -265,7 +312,7 @@ export function StudioOptionsModal({
             취소
           </button>
           <button onClick={create} className="rounded-lg bg-accent px-4 py-2 text-[13px] font-medium text-white hover:bg-accent/90">
-            만들기
+            {kind === 'tutor' ? '수업 시작' : '만들기'}
           </button>
         </div>
       </div>

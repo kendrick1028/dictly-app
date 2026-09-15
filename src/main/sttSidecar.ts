@@ -30,7 +30,11 @@ function pythonDir(): string {
 
 function venvPython(dir: string): string | null {
   // packaged: the self-contained standalone runtime; dev: the local .venv
-  const candidates = [join(dir, 'runtime', 'bin', 'python3'), join(dir, '.venv', 'bin', 'python')]
+  // (python-build-standalone lays out bin/python3 on macOS and python.exe at the root on Windows)
+  const candidates =
+    process.platform === 'win32'
+      ? [join(dir, 'runtime', 'python.exe'), join(dir, '.venv', 'Scripts', 'python.exe')]
+      : [join(dir, 'runtime', 'bin', 'python3'), join(dir, '.venv', 'bin', 'python')]
   for (const p of candidates) {
     if (existsSync(p)) return p
   }
@@ -64,6 +68,9 @@ export function ensureSidecar(): Promise<SidecarState> {
       env: {
         ...process.env,
         DICTLY_MODELS_DIR: join(dataDir(), 'models'),
+        // A packaged app is code-signed and its Resources tree must stay immutable. Prevent the
+        // embedded interpreter from refreshing .pyc files in the app bundle on launch.
+        PYTHONDONTWRITEBYTECODE: '1',
         // keep HF/torch from spawning excessive threads on first load
         OMP_NUM_THREADS: '4',
         // the new HF "xet" transfer protocol can hang on first model download;

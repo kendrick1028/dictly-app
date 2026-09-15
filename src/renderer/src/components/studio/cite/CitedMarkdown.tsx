@@ -7,7 +7,6 @@ import { Clock3, FileText } from 'lucide-react'
 import type { Components } from 'react-markdown'
 import { MarkdownMath } from '../../MarkdownMath'
 import { citeTokensToHtml } from '../../../lib/citations'
-import { fmtClock } from '../../../lib/time'
 import { useStore } from '../../../store/useStore'
 import { CitePopover } from './CitePopover'
 import type { StudioSourceMap } from '../../../../../shared/types'
@@ -51,8 +50,7 @@ function CiteChip(props: Record<string, unknown>): JSX.Element | null {
     hoverTimer.current = setTimeout(() => setHover(null), 120)
   }
 
-  const label = isTime ? fmtClock(t) : `${(pdfRefEntry!.name.replace(/\.pdf$/i, '') || 'PDF').slice(0, 10)}${pdfRefEntry!.name.replace(/\.pdf$/i, '').length > 10 ? '…' : ''} p.${page}`
-
+  // icon-only mini chip — details (source name, page, preview) live in the hover popover
   return (
     <>
       <button
@@ -65,11 +63,10 @@ function CiteChip(props: Record<string, unknown>): JSX.Element | null {
         }}
         onMouseEnter={enter}
         onMouseLeave={leave}
-        className="mx-0.5 inline-flex max-w-[160px] cursor-pointer items-center gap-0.5 rounded-full bg-accent/10 px-1.5 py-px align-baseline text-[10px] font-medium text-accent transition hover:bg-accent/20"
+        className="mx-0.5 inline-flex cursor-pointer items-center rounded bg-accent/10 p-[3px] align-baseline text-accent transition hover:bg-accent/20"
         title=""
       >
-        {isTime ? <Clock3 size={9} className="shrink-0" /> : <FileText size={9} className="shrink-0" />}
-        <span className="truncate tabular-nums">{label}</span>
+        {isTime ? <Clock3 size={10} className="shrink-0" /> : <FileText size={10} className="shrink-0" />}
       </button>
       {hover &&
         createPortal(

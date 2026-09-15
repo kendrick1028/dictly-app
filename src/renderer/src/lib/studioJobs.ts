@@ -5,7 +5,7 @@ import { useStore } from '../store/useStore'
 import { buildStudioManifest, buildFolderManifest, type ManifestResult } from './studioManifest'
 import { parseStudioOutput, parseFeynmanQuestions, studioKindLabel } from './studioParse'
 import { makeRound } from './feynman'
-import type { ExamRadarContent, FeynmanContent, Memo, StudioContent, StudioKind } from '../../../shared/types'
+import type { ExamRadarContent, FeynmanContent, Memo, StudioContent, StudioItem, StudioKind } from '../../../shared/types'
 
 /** a job targets either one memo or a folder's selected sources */
 export type JobTarget = { kind: 'memo'; memoId: number } | { kind: 'folder'; folderId: number; memoIds: number[]; pdfIds: number[]; noteIds: number[] }
@@ -68,6 +68,23 @@ export function resolveStudioTarget(): JobTarget | null {
   }
   if (st.selectedMemoId == null) return null
   return { kind: 'memo', memoId: st.selectedMemoId }
+}
+
+/** Rebuild a job target from a SAVED item's own stored sources so an interactive session
+ *  (Feynman / 튜터) can be reopened even when there's no live folder-source selection.
+ *  (Notes aren't stored in StudioSourceMap, so a resumed manifest uses only its memos + PDFs.) */
+export function targetFromItem(item: StudioItem): JobTarget | null {
+  if (item.folderId != null) {
+    return {
+      kind: 'folder',
+      folderId: item.folderId,
+      memoIds: (item.sources.memos ?? []).map((m) => m.memoId),
+      pdfIds: (item.sources.pdfs ?? []).map((p) => p.pdfId),
+      noteIds: []
+    }
+  }
+  if (item.memoId) return { kind: 'memo', memoId: item.memoId }
+  return null
 }
 
 /** everything an interactive studio feature (e.g. Feynman review) needs: built manifest,

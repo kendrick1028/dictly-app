@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize2, X, Volume2, ChevronDown, Sparkles, Loader2 } from 'lucide-react'
+import { ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Maximize2, X, Volume2, ChevronDown, Sparkles, Loader2, Navigation, GalleryVertical, RectangleVertical } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import { usePdfDoc } from '../pdf/usePdfDoc'
 import { renderPagePng } from '../lib/pdfText'
 import { PdfAnnotationLayer } from './PdfAnnotationLayer'
 import { PdfAnnotationToolbar } from './PdfAnnotationToolbar'
 import { fmtClock } from '../lib/time'
+import { toggleAutoPageFollow } from '../live/liveLectureEngine'
 import type { PDFDocumentProxy } from '../pdf/pdfjs-setup'
 
 const GAP = 12 // px between pages in the continuous scroll
@@ -81,10 +82,18 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
   const segments = useStore((s) => s.memo?.segments)
   const liveSegments = useStore((s) => s.rec.liveSegments)
   const recordingThis = useStore((s) => s.recordingMemoId != null && s.recordingMemoId === s.memo?.id)
+  // 교안 자동 넘김 status for the "자동" pill (only meaningful on the focused pane while recording)
+  const autoPage = useStore((s) => s.autoPage)
+  const autoFlash = useStore((s) => (s.autoPage.flash && s.autoPage.flash.pdfId === pdfId ? s.autoPage.flash : null))
 
   const { doc, numPages, loading, error } = usePdfDoc(meta?.path ?? null)
   const [unit, setUnit] = useState<{ w: number; h: number } | null>(null)
   const [wrapW, setWrapW] = useState(0)
+  const [wrapH, setWrapH] = useState(0)
+  // 'scroll' = continuous list (default) · 'single' = one page at a time, fit to the pane
+  const [viewMode, setViewMode] = useState<'scroll' | 'single'>(() => (localStorage.getItem('dictly.pdfViewMode') === 'single' ? 'single' : 'scroll'))
+  const viewModeRef = useRef(viewMode)
+  viewModeRef.current = viewMode
   const [scale, setScale] = useState<number | 'fit'>('fit')
   const [currentPage, setCurrentPage] = useState(storePage ?? 1)
   const [pageDraft, setPageDraft] = useState<string | null>(null) // raw input text while editing the page field
@@ -99,6 +108,7 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
   const lastFitRef = useRef(1)
   const curRef = useRef(currentPage)
   const rowHRef = useRef(0)
+  const ignoreScrollUntilRef = useRef(0)
   const scaleRef = useRef<number | 'fit'>(scale)
 
   const focused = focusedPdfId === pdfId
@@ -128,11 +138,19 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
     const wrap = wrapRef.current
     if (!wrap) return
     setWrapW(wrap.clientWidth)
+    setWrapH(wrap.clientHeight)
     if (typeof ResizeObserver === 'undefined') return
     let raf = 0
     const ro = new ResizeObserver(() => {
+      // a resize changes the row height; the browser then fires scroll events for the SAME pixel
+      // offset, which would re-derive a different page. Ignore scroll-derived page changes until
+      // the layout effect below has re-anchored the scroll position to the current page.
+      ignoreScrollUntilRef.current = performance.now() + 400
       cancelAnimationFrame(raf)
-      raf = requestAnimationFrame(() => setWrapW(wrap.clientWidth))
+      raf = requestAnimationFrame(() => {
+        setWrapW(wrap.clientWidth)
+        setWrapH(wrap.clientHeight)
+      })
     })
     ro.observe(wrap)
     return () => {
@@ -141,7 +159,9 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
     }
   }, [doc])
 
-  const fitScale = unit && wrapW ? Math.max(0.1, (wrapW - 24) / unit.w) : 1
+  const fitWidth = unit && wrapW ? Math.max(0.1, (wrapW - 24) / unit.w) : 1
+  const fitPage = unit && wrapW && wrapH ? Math.max(0.1, Math.min((wrapW - 24) / unit.w, (wrapH - 24) / unit.h)) : fitWidth
+  const fitScale = viewMode === 'single' ? fitPage : fitWidth
   const effScale = scale === 'fit' ? fitScale : scale
   const pageW = unit ? unit.w * effScale : 0
   const pageH = unit ? unit.h * effScale : 0
@@ -169,11 +189,30 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
   useEffect(() => {
     const el = wrapRef.current
     if (!el) return
+    let acc = 0
+    let coolUntil = 0
     const onWheel = (e: WheelEvent): void => {
-      if (!e.ctrlKey) return
-      e.preventDefault()
-      const base = scaleRef.current === 'fit' ? lastFitRef.current : scaleRef.current
-      setScale(Math.min(5, Math.max(0.2, base * (1 - e.deltaY * 0.01))))
+      if (e.ctrlKey) {
+        e.preventDefault()
+        const base = scaleRef.current === 'fit' ? lastFitRef.current : scaleRef.current
+        setScale(Math.min(5, Math.max(0.2, base * (1 - e.deltaY * 0.01))))
+        return
+      }
+      if (viewModeRef.current !== 'single') return
+      // one page at a time: a wheel past the page's edge turns the page (with a small threshold
+      // + cooldown so a trackpad fling turns exactly one)
+      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+      const atTop = el.scrollTop <= 0
+      if ((e.deltaY > 0 && atBottom) || (e.deltaY < 0 && atTop)) {
+        const now = Date.now()
+        if (now < coolUntil) return
+        acc += e.deltaY
+        if (Math.abs(acc) >= 90) {
+          goRef.current(curRef.current + (acc > 0 ? 1 : -1))
+          acc = 0
+          coolUntil = now + 450
+        }
+      } else acc = 0
     }
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
@@ -188,52 +227,110 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
     setRange([Math.max(1, first - 1), Math.min(total, last + 1)])
   }, [rowH, total])
 
+  /** current page = the row at the top of the viewport, except in the final stretch: the last
+   *  pages can never reach the top (the list stops scrolling), so the remaining scroll distance
+   *  there is spread over the trailing pages and the very bottom always means the last page */
+  const pageAtScroll = (el: HTMLElement, rh: number): number => {
+    const first = Math.max(1, Math.floor(el.scrollTop / rh) + 1)
+    const maxTop = Math.max(0, el.scrollHeight - el.clientHeight)
+    const firstAtBottom = Math.max(1, Math.floor(maxTop / rh) + 1)
+    if (firstAtBottom >= total) return Math.min(total, first)
+    // final zone: from one row before the last reachable top row to the very bottom — the pages
+    // from there to the end share that scroll distance equally, so each trailing page still gets
+    // a comfortable stretch instead of the last ones getting none
+    const base = Math.max(1, firstAtBottom - 1)
+    const zoneStart = (base - 1) * rh
+    if (el.scrollTop < zoneStart) return Math.min(total, first)
+    const count = total - base + 1
+    const u = maxTop > zoneStart ? Math.max(0, Math.min(1, (el.scrollTop - zoneStart) / (maxTop - zoneStart))) : 1
+    return Math.min(total, base + Math.min(count - 1, Math.floor(u * count)))
+  }
+
   const onScroll = (): void => {
+    if (viewModeRef.current === 'single') return
     const el = wrapRef.current
     const rh = rowHRef.current
     if (!el || !rh || !total) return
     const first = Math.max(1, Math.floor(el.scrollTop / rh) + 1)
     const last = Math.min(total, Math.floor((el.scrollTop + el.clientHeight) / rh) + 1)
     setRange([Math.max(1, first - 1), Math.min(total, last + 1)])
-    if (first !== curRef.current) {
-      curRef.current = first
-      setCurrentPage(first)
-      setCurrentPdfPage(pdfId, first)
+    if (performance.now() < ignoreScrollUntilRef.current) return // layout shift, not the user
+    const cur = pageAtScroll(el, rh)
+    if (cur !== curRef.current) {
+      curRef.current = cur
+      setCurrentPage(cur)
+      setCurrentPdfPage(pdfId, cur)
       setMarkersOpen(false)
     }
   }
 
+  // a store page we could not apply yet (document not laid out) — applied as soon as rowH exists
+  const pendingPageRef = useRef<number | null>(null)
   useEffect(() => {
-    if (doc) setCurrentPdfPage(pdfId, curRef.current)
+    // on load, publish our page — unless a target page is already waiting (auto page-turn /
+    // citation jump issued before the doc rendered), in which case that target wins
+    if (doc && pendingPageRef.current == null) setCurrentPdfPage(pdfId, curRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [doc])
 
-  // external page jump (transcript badge) → scroll to it
+  // external page jump (transcript badge / 교안 자동 넘김) → scroll to it
   useEffect(() => {
     if (!storePage || storePage === curRef.current) return
+    if (viewModeRef.current === 'single') {
+      curRef.current = storePage
+      setCurrentPage(storePage)
+      pendingPageRef.current = null
+      wrapRef.current?.scrollTo({ top: 0 })
+      return
+    }
     const el = wrapRef.current
     if (el && rowHRef.current) {
       el.scrollTop = (storePage - 1) * rowHRef.current
       curRef.current = storePage
       setCurrentPage(storePage)
-    }
+      pendingPageRef.current = null
+    } else pendingPageRef.current = storePage
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storePage])
+  // retry the pending jump once the layout is measurable
+  useEffect(() => {
+    const p = pendingPageRef.current
+    const el = wrapRef.current
+    if (p == null || !el || !rowH || !total) return
+    if (viewModeRef.current === 'scroll') el.scrollTop = (p - 1) * rowH
+    curRef.current = p
+    setCurrentPage(p)
+    pendingPageRef.current = null
+  }, [rowH, total])
 
-  // keep the current page anchored across zoom changes
+  // keep the current page anchored across zoom changes / view-mode switches
   useEffect(() => {
     const el = wrapRef.current
-    if (el && rowHRef.current) el.scrollTop = (curRef.current - 1) * rowHRef.current
+    if (!el) return
+    ignoreScrollUntilRef.current = performance.now() + 250
+    if (viewMode === 'scroll' && rowHRef.current) el.scrollTop = (curRef.current - 1) * rowHRef.current
+    else if (viewMode === 'single') el.scrollTo({ top: 0, left: 0 })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effScale])
+  }, [effScale, viewMode])
 
   const go = (p: number): void => {
     const np = Math.min(Math.max(1, Math.round(p) || 1), total || p)
     const el = wrapRef.current
-    if (el && rowHRef.current) el.scrollTop = (np - 1) * rowHRef.current
+    if (el) {
+      if (viewModeRef.current === 'scroll' && rowHRef.current) el.scrollTop = (np - 1) * rowHRef.current
+      else el.scrollTo({ top: 0, left: 0 })
+    }
     curRef.current = np
     setCurrentPage(np)
     setCurrentPdfPage(pdfId, np)
+  }
+  const goRef = useRef(go)
+  goRef.current = go
+  const toggleViewMode = (): void => {
+    const next = viewMode === 'single' ? 'scroll' : 'single'
+    localStorage.setItem('dictly.pdfViewMode', next)
+    setScale('fit')
+    setViewMode(next)
   }
 
   const zoomIn = (): void => setScale((s) => Math.min(5, (s === 'fit' ? lastFitRef.current : s) * 1.2))
@@ -330,6 +427,18 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
         if (e.shiftKey) redoAnnotation(pdfId)
         else undoAnnotation(pdfId)
       }
+      // one-page mode: arrow keys / PageUp·PageDown turn pages (not while typing in a field)
+      const tag = (e.target as HTMLElement | null)?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement | null)?.isContentEditable) return
+      if (viewModeRef.current === 'single') {
+        if (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === ' ') {
+          e.preventDefault()
+          goRef.current(curRef.current + 1)
+        } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+          e.preventDefault()
+          goRef.current(curRef.current - 1)
+        }
+      }
     }
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
@@ -355,6 +464,41 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
           </span>
         </div>
 
+        {recordingThis && focused && autoPage.on && (
+          <button
+            onClick={toggleAutoPageFollow}
+            className={`flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] ${
+              autoPage.status === 'following' || autoPage.status === 'lost'
+                ? 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                : autoPage.status === 'paused'
+                  ? 'bg-black/[0.05] text-subtle hover:bg-black/10'
+                  : 'bg-black/[0.05] text-subtle/70'
+            }`}
+            title={
+              autoPage.status === 'following' || autoPage.status === 'lost'
+                ? `교안 자동 넘김: 강의를 듣고 페이지를 찾는 중 (${autoPage.engine === 'lexical+embed' ? '어휘+임베딩' : '어휘'} 매칭) — 클릭하면 잠시 멈춤`
+                : autoPage.status === 'paused'
+                  ? '자동 넘김 일시정지 — 클릭하면 지금 페이지부터 다시 따라가요'
+                  : autoPage.status === 'noText'
+                    ? '교안에 텍스트가 없어요 (OCR 인덱싱 필요)'
+                    : '교안 자동 넘김'
+            }
+          >
+            {autoPage.status === 'following' || autoPage.status === 'lost' ? <Loader2 size={11} className="animate-spin" /> : <Navigation size={11} />}
+            자동
+            {/* the page the tracker last moved to — shown only once a turn is confirmed */}
+            {(autoPage.status === 'following' || autoPage.status === 'lost') && autoPage.lastAutoPage != null && (
+              <span key={autoPage.lastTurnAt} className="dictly-pop-in ml-0.5 rounded bg-emerald-600/10 px-1 font-semibold tabular-nums">p.{autoPage.lastAutoPage}</span>
+            )}
+          </button>
+        )}
+        <button
+          onClick={toggleViewMode}
+          className="shrink-0 rounded-md p-1 text-subtle hover:bg-black/5"
+          title={viewMode === 'single' ? '연속 보기로 전환' : '한 페이지씩 보기로 전환 (← → 키 · 휠로 넘김)'}
+        >
+          {viewMode === 'single' ? <GalleryVertical size={14} /> : <RectangleVertical size={14} />}
+        </button>
         <button
           onClick={extract}
           disabled={extracting}
@@ -439,7 +583,7 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
           }}
           className="w-12 rounded-md bg-black/[0.04] px-1 py-0.5 text-center text-[11px] tabular-nums text-ink outline-none focus:bg-black/[0.07]"
         />
-        <span className="text-[11px] text-subtle">/ {total || '?'}</span>
+        <span className="shrink-0 whitespace-nowrap text-[11px] text-subtle">/ {total || '?'}</span>
         <button
           onClick={() => go(currentPage + 1)}
           disabled={total > 0 && currentPage >= total}
@@ -489,12 +633,29 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
       >
         {(loading || (!unit && !error)) && <div className="pt-8 text-center text-[12px] text-subtle">PDF 불러오는 중…</div>}
         {error && <div className="pt-8 text-center text-[12px] text-red-500">{error}</div>}
-        {doc && unit && total > 0 && (
+        {doc && unit && total > 0 && viewMode === 'single' && (
+          // one page at a time, centered; the page swaps with a short fade when it turns
+          <div className="flex min-h-full items-center justify-center">
+            <div key={currentPage} className="dictly-anim-in relative" style={{ width: pageW, height: pageH }}>
+              <PdfPageCanvas doc={doc} pageNum={currentPage} scale={renderScale} cssW={pageW} cssH={pageH} />
+              <PdfAnnotationLayer doc={doc} pdfId={pdfId} page={currentPage} pageW={pageW} pageH={pageH} />
+              {autoFlash && autoFlash.page === currentPage && (
+                <div key={autoFlash.at} className="dictly-autopage-flash pointer-events-none absolute inset-0 rounded ring-2 ring-emerald-400/70" />
+              )}
+            </div>
+          </div>
+        )}
+        {doc && unit && total > 0 && viewMode === 'scroll' && (
           <div style={{ position: 'relative', width: pageW, height: Math.max(0, total * rowH - GAP), margin: '0 auto' }}>
             {pages.map((i) => (
               <div key={i} style={{ position: 'absolute', top: (i - 1) * rowH, left: 0, width: pageW, height: pageH }}>
                 <PdfPageCanvas doc={doc} pageNum={i} scale={renderScale} cssW={pageW} cssH={pageH} />
                 <PdfAnnotationLayer doc={doc} pdfId={pdfId} page={i} pageW={pageW} pageH={pageH} />
+                {/* current page: soft accent frame + page badge so you always know where you are */}
+                {i === currentPage && <div className="pointer-events-none absolute inset-0 rounded ring-2 ring-accent/45 transition" />}
+                {autoFlash && autoFlash.page === i && (
+                  <div key={autoFlash.at} className="dictly-autopage-flash pointer-events-none absolute inset-0 rounded ring-2 ring-emerald-400/70" />
+                )}
               </div>
             ))}
           </div>
@@ -506,7 +667,7 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
         <button onClick={zoomOut} className="rounded-full p-1.5 text-subtle hover:bg-black/5" title="축소">
           <ZoomOut size={15} />
         </button>
-        <button onClick={() => setScale('fit')} className="rounded-full p-1.5 text-subtle hover:bg-black/5" title="너비 맞춤">
+        <button onClick={() => setScale('fit')} className="rounded-full p-1.5 text-subtle hover:bg-black/5" title={viewMode === 'single' ? '페이지 맞춤' : '너비 맞춤'}>
           <Maximize2 size={14} />
         </button>
         <button onClick={zoomIn} className="rounded-full p-1.5 text-subtle hover:bg-black/5" title="확대">

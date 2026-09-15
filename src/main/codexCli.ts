@@ -1,16 +1,15 @@
-import { spawn } from 'child_process'
+import { spawnCli } from './cliBin'
 import { existsSync, readFileSync, unlink } from 'fs'
 import { homedir, tmpdir } from 'os'
-import { join } from 'path'
-import type { ProviderStatus } from '../shared/types'
+import { join, delimiter } from 'path'
+import type { CliAccount, ProviderStatus } from '../shared/types'
 import { wireAbort } from './claudeCli'
 import type { RunClaudeOptions } from './claudeCli'
 
-let cachedBin: string | null | undefined
+const RECONNECT_DELAYS_MS = [0, 1000, 2000, 4000, 8000]
 
 /** GUI-launched apps on macOS have a minimal PATH; resolve the codex binary explicitly. */
 function resolveCodexBin(): string | null {
-  if (cachedBin !== undefined) return cachedBin
   const home = homedir()
   const candidates = [
     join(home, '.npm-global', 'bin', 'codex'),
@@ -18,11 +17,14 @@ function resolveCodexBin(): string | null {
     '/usr/local/bin/codex',
     join(home, '.local', 'bin', 'codex')
   ]
-  for (const dir of (process.env.PATH || '').split(':')) {
-    if (dir) candidates.push(join(dir, 'codex'))
+  // npm installs `codex.cmd` shims on Windows (and %APPDATA%\npm is the global bin there)
+  if (process.platform === 'win32' && process.env.APPDATA) candidates.push(join(process.env.APPDATA, 'npm', 'codex.cmd'))
+  for (const dir of (process.env.PATH || '').split(delimiter)) {
+    if (dir) candidates.push(join(dir, 'codex'), join(dir, 'codex.cmd'))
   }
-  cachedBin = candidates.find((c) => existsSync(c)) ?? null
-  return cachedBin
+  // Do not cache this lookup. npm briefly removes/replaces the wrapper during an update; caching
+  // that transient "missing" result made Dictly stay disconnected until the whole app restarted.
+  return candidates.find((c) => existsSync(c)) ?? null
 }
 
 /** cheap availability check (no spawn) — the codex CLI wrapper is present. */
@@ -33,30 +35,105 @@ export function hasCodexBin(): boolean {
 function spawnEnv(): NodeJS.ProcessEnv {
   const home = homedir()
   const extra = [join(home, '.npm-global', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', join(home, '.local', 'bin')]
-  return { ...process.env, PATH: [...extra, process.env.PATH || ''].join(':') }
+  return { ...process.env, PATH: [...extra, process.env.PATH || ''].join(delimiter) }
 }
 
-export async function codexStatus(): Promise<ProviderStatus> {
-  const bin = resolveCodexBin()
-  if (!bin) return { installed: false, loggedIn: false, version: null }
-  const loggedIn = existsSync(join(homedir(), '.codex', 'auth.json'))
+function isInstallTransitionError(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error ?? '')).toLowerCase()
+  return /enoent|module_not_found|cannot find module|no such file or directory|native binary.*missing|codex cli.*찾을 수 없|spawn.*codex/.test(message)
+}
+
+function waitForReconnect(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms === 0) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(new Error('AI 응답이 중단되었습니다'))
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    if (signal?.aborted) onAbort()
+    else signal?.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** npm updates replace the CLI wrapper and native package in-place. Retry only that narrow,
+ * transient failure class; auth, model, quota, and network errors still surface immediately. */
+async function withCodexReconnect<T>(run: (bin: string) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  let lastError: unknown = new Error('codex CLI를 찾을 수 없습니다. `npm i -g @openai/codex` 후 `codex login` 하세요.')
+  for (let i = 0; i < RECONNECT_DELAYS_MS.length; i++) {
+    await waitForReconnect(RECONNECT_DELAYS_MS[i], signal)
+    const bin = resolveCodexBin()
+    if (!bin) continue
+    try {
+      return await run(bin)
+    } catch (error) {
+      lastError = error
+      if (!isInstallTransitionError(error)) throw error
+    }
+  }
+  throw lastError
+}
+
+function codexVersion(bin: string): Promise<{ usable: boolean; version: string | null }> {
   return new Promise((resolve) => {
-    const p = spawn(bin, ['--version'], { env: spawnEnv() })
+    const p = spawnCli(bin, ['--version'], { env: spawnEnv() })
     let out = ''
     let err = ''
     p.stdout.on('data', (d) => (out += d.toString()))
     p.stderr.on('data', (d) => (err += d.toString()))
-    // outer spawn of the wrapper itself failed
-    p.on('error', () => resolve({ installed: false, loggedIn, version: null }))
+    p.on('error', () => resolve({ usable: false, version: null }))
     p.on('exit', (code) => {
       const version = out.trim()
-      // A broken/partial install (the platform native binary is missing) leaves the JS wrapper in
-      // place but it exits non-zero with an ENOENT on stderr and prints no version. Report it as
-      // NOT usable so the UI prompts a reinstall instead of appearing connected-but-failing.
       const broken = code !== 0 || !version || /ENOENT|spawn|Error:/i.test(err)
-      resolve({ installed: !broken, loggedIn, version: version || null })
+      resolve({ usable: !broken, version: version || null })
     })
   })
+}
+
+export async function codexStatus(): Promise<ProviderStatus> {
+  const loggedIn = existsSync(join(homedir(), '.codex', 'auth.json'))
+  // A status check can land in the short window where npm has replaced the wrapper but not yet the
+  // native binary. Re-resolve and retry briefly so the UI does not latch onto that transient state.
+  for (const delayMs of [0, 300, 1000]) {
+    if (delayMs) await waitForReconnect(delayMs)
+    const bin = resolveCodexBin()
+    if (!bin) continue
+    const result = await codexVersion(bin)
+    if (result.usable) return { installed: true, loggedIn, version: result.version }
+  }
+  return { installed: false, loggedIn, version: null }
+}
+
+/** Signed-in Codex account from ~/.codex/auth.json — email + ChatGPT plan come from the id_token's
+ *  claims (decoded locally; the token itself never leaves this function). API-key mode → plan 'api'. */
+export function codexAccount(): CliAccount | null {
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), '.codex', 'auth.json'), 'utf-8')) as {
+      auth_mode?: string
+      OPENAI_API_KEY?: string | null
+      tokens?: { id_token?: string }
+    }
+    const idTok = raw.tokens?.id_token
+    if (idTok) {
+      const part = idTok.split('.')[1] ?? ''
+      const claims = JSON.parse(Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8')) as Record<string, unknown>
+      const auth = (claims['https://api.openai.com/auth'] ?? {}) as Record<string, unknown>
+      return {
+        email: typeof claims.email === 'string' ? claims.email : null,
+        name: null,
+        plan: typeof auth.chatgpt_plan_type === 'string' ? auth.chatgpt_plan_type : null,
+        org: null,
+        method: 'chatgpt'
+      }
+    }
+    if (raw.OPENAI_API_KEY) return { email: null, name: null, plan: 'api', org: null, method: 'apikey' }
+    return null
+  } catch {
+    return null
+  }
 }
 
 let tmpCounter = 0
@@ -69,12 +146,7 @@ let tmpCounter = 0
  * never for realtime per-chunk correction.
  */
 export function runCodex(opts: RunClaudeOptions, reasoning = 'low'): Promise<string> {
-  const bin = resolveCodexBin()
-  return new Promise((resolve, reject) => {
-    if (!bin) {
-      reject(new Error('codex CLI를 찾을 수 없습니다. `npm i -g @openai/codex` 후 `codex login` 하세요.'))
-      return
-    }
+  return withCodexReconnect((bin) => new Promise((resolve, reject) => {
     const outFile = join(tmpdir(), `dictly-codex-${process.pid}-${Date.now()}-${tmpCounter++}.txt`)
     const prompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n${opts.instruction}` : opts.instruction
     const args = [
@@ -95,7 +167,7 @@ export function runCodex(opts: RunClaudeOptions, reasoning = 'low'): Promise<str
     if (opts.model && opts.model !== 'default') args.push('-m', opts.model)
     args.push(prompt)
 
-    const p = spawn(bin, args, { env: spawnEnv() })
+    const p = spawnCli(bin, args, { env: spawnEnv() })
     let err = ''
     const timer = setTimeout(() => {
       p.kill()
@@ -125,7 +197,83 @@ export function runCodex(opts: RunClaudeOptions, reasoning = 'low'): Promise<str
 
     if (opts.content) p.stdin.write(opts.content)
     p.stdin.end()
-  })
+  }), opts.signal)
+}
+
+/**
+ * Streaming variant: spawns `codex exec --json` and emits the assistant message via onDelta as it
+ * arrives. codex ≤0.144 emits the full message once (item.completed) rather than token deltas, so
+ * on those versions this behaves like a single emit-at-end; on any version that emits
+ * agent_message deltas it streams incrementally. Returns the final text.
+ */
+export function runCodexStream(opts: RunClaudeOptions, reasoning = 'low', onDelta: (full: string) => void): Promise<string> {
+  return withCodexReconnect((bin) => new Promise((resolve, reject) => {
+    const prompt = opts.systemPrompt ? `${opts.systemPrompt}\n\n${opts.instruction}` : opts.instruction
+    const args = [
+      'exec',
+      '--json',
+      '--skip-git-repo-check',
+      '--ephemeral',
+      '--sandbox',
+      'read-only',
+      '--color',
+      'never',
+      '-c',
+      `model_reasoning_effort="${reasoning}"`
+    ]
+    if (opts.model && opts.model !== 'default') args.push('-m', opts.model)
+    args.push(prompt)
+
+    const p = spawnCli(bin, args, { env: spawnEnv() })
+    let buf = ''
+    let full = ''
+    let err = ''
+    const timer = setTimeout(() => {
+      p.kill()
+      reject(new Error('codex 응답 시간 초과'))
+    }, opts.timeoutMs ?? 300000)
+    wireAbort(opts.signal, p, timer, reject)
+
+    p.stdout.on('data', (d) => {
+      buf += d.toString()
+      let idx: number
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx)
+        buf = buf.slice(idx + 1)
+        if (!line.trim()) continue
+        try {
+          const o = JSON.parse(line)
+          // token deltas (newer codex) — accumulate
+          if (o.type === 'agent_message_delta' && typeof o.delta === 'string') {
+            full += o.delta
+            onDelta(full)
+            // full/updated message (all versions) — the agent_message item carries the whole text
+          } else if ((o.type === 'item.completed' || o.type === 'item.updated') && o.item?.type === 'agent_message' && typeof o.item.text === 'string') {
+            if (o.item.text.length >= full.length) {
+              full = o.item.text
+              onDelta(full)
+            }
+          }
+        } catch {
+          /* ignore non-JSON lines */
+        }
+      }
+    })
+    p.stderr.on('data', (d) => (err += d.toString()))
+    p.on('error', (e) => {
+      clearTimeout(timer)
+      reject(e)
+    })
+    p.on('exit', (code) => {
+      clearTimeout(timer)
+      if (full) resolve(full.trim())
+      else if (code === 0) resolve('')
+      else reject(new Error(err.trim() || `codex 종료 코드 ${code}`))
+    })
+
+    if (opts.content) p.stdin.write(opts.content)
+    p.stdin.end()
+  }), opts.signal)
 }
 
 /** Vision variant: attach image files (-i) and have Codex analyze them. Used for image/scanned
@@ -137,12 +285,7 @@ export function runCodexVision(
   reasoning = 'low',
   timeoutMs = 240000
 ): Promise<string> {
-  const bin = resolveCodexBin()
-  return new Promise((resolve, reject) => {
-    if (!bin) {
-      reject(new Error('codex CLI를 찾을 수 없습니다.'))
-      return
-    }
+  return withCodexReconnect((bin) => new Promise((resolve, reject) => {
     const outFile = join(tmpdir(), `dictly-codex-${process.pid}-${Date.now()}-${tmpCounter++}.txt`)
     const prompt = systemPrompt ? `${systemPrompt}\n\n${instruction}` : instruction
     const args = [
@@ -161,7 +304,7 @@ export function runCodexVision(
     for (const ip of imagePaths) args.push('-i', ip)
     args.push(prompt)
 
-    const p = spawn(bin, args, { env: spawnEnv() })
+    const p = spawnCli(bin, args, { env: spawnEnv() })
     let err = ''
     const timer = setTimeout(() => {
       p.kill()
@@ -187,5 +330,5 @@ export function runCodexVision(
       else reject(new Error(err.trim() || `codex 종료 코드 ${code}`))
     })
     p.stdin.end()
-  })
+  }))
 }

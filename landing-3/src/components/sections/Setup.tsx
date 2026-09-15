@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 import { ExternalLink } from 'lucide-react'
-import { DMG_URL } from '@/content'
+import { useLatestRelease } from '@/lib/release'
 import { Reveal } from '@/components/Reveal'
 import { Terminal } from '@/components/Terminal'
 
@@ -31,6 +31,7 @@ function Ext({ href, children }: { href: string; children: ReactNode }) {
 }
 
 export function Setup() {
+  const { dmgUrl, exeUrl } = useLatestRelease()
   return (
     <section id="setup" className="border-t border-line bg-white">
       <div className="mx-auto max-w-3xl px-5 py-20 sm:px-8 sm:py-28">
@@ -44,7 +45,7 @@ export function Setup() {
             <b className="font-semibold text-ink"> AI 기능</b>만 아래 CLI 도구 중 하나가 필요해요.
           </p>
           <div className="mt-6 rounded-xl border border-line bg-wash p-4 text-[14px] leading-relaxed text-sub">
-            <b className="font-semibold text-ink">한눈에</b> — ① DMG 설치 → ② 첫 실행 시 보안 허용(미공증) → ③ AI 쓰려면 Claude Code
+            <b className="font-semibold text-ink">한눈에</b> — ① 설치(Mac은 DMG, Windows는 exe) → ② 첫 실행 시 보안 허용(미서명) → ③ AI 쓰려면 Claude Code
             또는 Codex CLI 설치 + 로그인.
           </div>
         </Reveal>
@@ -52,9 +53,17 @@ export function Setup() {
         <div className="mt-8">
           <Step no="01" title="설치">
             <p>
-              <Ext href={DMG_URL}>DMG 파일 다운로드</Ext> 후 열어서 <b className="font-semibold text-ink">Dictly</b>를{' '}
-              <b className="font-semibold text-ink">응용 프로그램</b> 폴더로 드래그하세요. Apple Silicon(M1 이상) · macOS 14+ 필요.
+              <b className="font-semibold text-ink">Mac</b> — <Ext href={dmgUrl}>DMG 파일 다운로드</Ext> 후 열어서{' '}
+              <b className="font-semibold text-ink">Dictly</b>를 <b className="font-semibold text-ink">응용 프로그램</b> 폴더로 드래그하세요.
+              Apple Silicon(M1 이상) · macOS 14+ 필요.
             </p>
+            {exeUrl && (
+              <p>
+                <b className="font-semibold text-ink">Windows</b> — <Ext href={exeUrl}>설치 파일(.exe) 다운로드</Ext> 후 실행하세요. 코드 서명이
+                없어 SmartScreen 경고가 뜨면 <b className="font-semibold text-ink">추가 정보 → 실행</b>을 누르면 됩니다. Windows 10/11 64비트 ·
+                전사는 CPU(faster-whisper)로 동작하고, Live 전사는 Mac 전용입니다.
+              </p>
+            )}
           </Step>
 
           <Step no="02" title="첫 실행 — 보안 허용 (미공증 앱)">

@@ -2,6 +2,8 @@ import { useStore, isDefaultTitle, sanitizeTitle } from '../store/useStore'
 import { segmentsToMarkdown } from '../math/koMathRules'
 import { wordSubs } from '../lib/wordDiff'
 import type { Segment } from '../../../shared/types'
+import { isWhisperHallucination } from '../../../shared/hallucination'
+import { LiveLectureEngine, liveEngine } from '../live/liveLectureEngine'
 import workletUrl from './pcm-worklet.js?url'
 
 interface RecSession {
@@ -124,7 +126,11 @@ let activeCorrections = 0
 // Correction waits for FOLLOWING context: a chunk is only corrected once this many later
 // chunks exist, so the AI sees both the preceding AND the next chunks (better disambiguation
 // of homophones / cut-off phrases). Trailing chunks are flushed at stop.
-const FOLLOW_DELAY = 2
+// Default 2; the user tunes it in the ⚙ options (0 = correct/translate each chunk immediately,
+// no following context; higher = better disambiguation but the translation lags that many chunks).
+function followDelay(): number {
+  return useStore.getState().rec.correctFollowDelay
+}
 // highest live-segment index already queued for correction (monotonic; avoids double-scheduling)
 let scheduledIdx = -1
 // ad-hoc term corrections applied to incoming live chunks (not persisted as rules)
@@ -163,7 +169,7 @@ function stripChunkText(t: string): string {
  * `text` = the trailing (possibly still-in-progress) last sentence for the current segment.
  * `prevGiven` distinguishes an explicit empty prev ("merge into current") from a parse failure.
  */
-export function parseCorrection(raw: string): { prev: string; text: string; prevGiven: boolean } {
+export function parseCorrection(raw: string): { prev: string; text: string; prevGiven: boolean; ko: string } {
   const cleaned = raw.replace(/```(?:json)?/gi, '').trim()
   const m = cleaned.match(/\{[\s\S]*\}/)
   if (m) {
@@ -172,13 +178,29 @@ export function parseCorrection(raw: string): { prev: string; text: string; prev
       return {
         prev: String(o.prev ?? '').trim(),
         text: String(o.text ?? '').trim(),
-        prevGiven: Object.prototype.hasOwnProperty.call(o, 'prev')
+        prevGiven: Object.prototype.hasOwnProperty.call(o, 'prev'),
+        ko: String(o.ko ?? '').trim()
       }
     } catch {
       /* fall through */
     }
   }
-  return { prev: '', text: stripChunkText(cleaned), prevGiven: false }
+  return { prev: '', text: stripChunkText(cleaned), prevGiven: false, ko: '' }
+}
+
+/** Meta bills whole seconds of processed audio at $/hour; convert with the cached USD→KRW rate. */
+export function metaCostKrw(usage: { audioSec: number; usdPerHour: number }, rate?: number): { usd: number; krw: number } {
+  const usd = (Math.floor(usage.audioSec) / 3600) * usage.usdPerHour
+  return { usd, krw: Math.round(usd * (rate || 1350)) }
+}
+
+/** Should this chunk get a Korean translation alongside correction? Yes for an English session,
+ *  or in auto-language mode when the chunk itself carries no Hangul but has Latin text. */
+function wantsTranslation(chunk: string): boolean {
+  const lang = useStore.getState().rec.language
+  if (lang === 'ko') return false
+  if (lang === 'en') return true
+  return !/[가-힣]/.test(chunk) && /[A-Za-z]{3,}/.test(chunk)
 }
 
 async function correctOne(idx: number, systemPrompt: string): Promise<void> {
@@ -192,15 +214,18 @@ async function correctOne(idx: number, systemPrompt: string): Promise<void> {
     const context = segs.slice(Math.max(0, idx - 6), idx).map((s) => s.text).join(' ').slice(-1500)
     // FOLLOWING context: the next chunks (already arrived thanks to FOLLOW_DELAY) help the
     // AI resolve homophones / phrases that only make sense once you hear what comes after.
-    const follow = segs.slice(idx + 1, idx + 1 + FOLLOW_DELAY).map((s) => s.text).join(' ').slice(0, 1500)
+    const follow = segs.slice(idx + 1, idx + 1 + Math.max(1, followDelay())).map((s) => s.text).join(' ').slice(0, 1500)
     const chunk = segs[idx].text
-    const { text } = parseCorrection(
-      await window.api.claude.correctChunk(context, follow, chunk, systemPrompt, useStore.getState().claudeModel)
+    const translate = wantsTranslation(chunk)
+    const { text, ko } = parseCorrection(
+      await window.api.claude.correctChunk(context, follow, chunk, systemPrompt, useStore.getState().claudeModel, translate ? 'ko' : undefined)
     )
     if (editedLive.has(idx)) return
     const out = applyRuntime(text || chunk)
+    // a foreign-language chunk gets its Korean translation attached (shown under the chunk)
+    if (translate && ko) useStore.getState().updateLiveSegment(idx, out || chunk, ko)
     if (out && out !== chunk) {
-      useStore.getState().updateLiveSegment(idx, out)
+      if (!(translate && ko)) useStore.getState().updateLiveSegment(idx, out)
       // agent self-improvement: learn repeated single-word corrections from the live AI pass
       const st = useStore.getState()
       const agent = st.agents.find((a) => a.id === (st.memo?.agentId ?? st.activeAgentId))
@@ -243,17 +268,26 @@ function correctionSystemPrompt(
   // memo-specific keywords first (priority), then the agent's correction keywords
   const memoKw = useStore.getState().memo?.keywords ?? []
   const kw = [...memoKw, ...(agent?.correctionKeywords ?? [])].join(', ').slice(0, CORRECTION_HINT_CAP)
-  if (!kw) return base
-  const hint = `[전문 용어·표기 참고] 다음 용어가 자주 등장합니다 — 음성인식 오류로 보이면 이 표기로 교정하세요(억지로 끼워넣지는 말 것): ${kw}`
-  return base ? `${base}\n\n${hint}` : hint
+  const parts = [base]
+  // non-Korean sessions: the chunk instruction is written in Korean — make sure the model keeps
+  // the transcript's own language instead of translating it
+  const lang = useStore.getState().rec.language
+  if (lang === 'en') parts.push('[언어] 이 전사문은 영어입니다. 영어 그대로 교정하고 절대 번역하지 마세요.')
+  else if (lang === 'auto') parts.push('[언어] 청크의 언어를 그대로 유지하세요(번역 금지).')
+  if (kw) parts.push(`[전문 용어·표기 참고] 다음 용어가 자주 등장합니다 — 음성인식 오류로 보이면 이 표기로 교정하세요(억지로 끼워넣지는 말 것): ${kw}`)
+  return parts.filter(Boolean).join('\n\n')
 }
 
-/** Queue chunk `idx` for correction once (monotonic guard). */
+/** Queue every not-yet-scheduled chunk up to `idx` for correction (monotonic; each index once).
+ *  Scheduling a RANGE (not just `idx`) means lowering the follow-delay mid-recording catches up
+ *  on the chunks that were still waiting instead of skipping them. */
 function scheduleCorrection(idx: number, systemPrompt: string): void {
   if (idx < 0 || idx <= scheduledIdx) return
+  for (let j = scheduledIdx + 1; j <= idx; j++) {
+    correctQueue.push(j)
+    useStore.getState().markCorrecting(j, true)
+  }
   scheduledIdx = idx
-  correctQueue.push(idx)
-  useStore.getState().markCorrecting(idx, true)
   pumpCorrections(systemPrompt)
 }
 
@@ -284,6 +318,24 @@ function bumpFinalizeStall(): void {
 // keywords) cut off, and a huge list dilutes the bias. Cap it ourselves so every included term
 // actually biases recognition; priority-first order then guarantees the important terms survive.
 const INITIAL_PROMPT_CAP = 350
+/** Glossary terms for engines with native vocabulary biasing (Meta `keywords`): the note's own
+ *  keywords first, then the agent's transcription + correction keywords. Deduped, capped. */
+function buildKeywordList(): string[] {
+  const st = useStore.getState()
+  const agent = st.agents.find((a) => a.id === st.activeAgentId)
+  const terms = [...(st.memo?.keywords ?? []), ...(agent?.keywords ?? []), ...(agent?.correctionKeywords ?? [])]
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const t of terms) {
+    const k = t.trim()
+    if (!k || seen.has(k.toLowerCase())) continue
+    seen.add(k.toLowerCase())
+    out.push(k)
+    if (out.length >= 100) break
+  }
+  return out
+}
+
 function buildInitialPrompt(): string {
   const st = useStore.getState()
   const agent = st.agents.find((a) => a.id === st.activeAgentId)
@@ -404,6 +456,7 @@ export async function startRecording(): Promise<void> {
   const rollback = (msg?: string): void => {
     starting = false
     cancelStart = false
+    liveEngine()?.stop()
     useStore.getState().setRecordingMemo(null)
     setRec({ isRecording: false, paused: false, finalizing: false, sttState: 'idle', ...(msg ? { sttError: msg } : {}) })
   }
@@ -418,7 +471,8 @@ export async function startRecording(): Promise<void> {
     finalizeRemaining: 0,
     sttState: 'loading',
     sttError: null,
-    partial: ''
+    partial: '',
+    cloudUsage: {}
   })
 
   const sidecar = await window.api.stt.ensure()
@@ -497,7 +551,9 @@ export async function startRecording(): Promise<void> {
         apiKey: tr.apiKey,
         oaiModel: 'gpt-realtime-whisper',
         realtimePreview: tr.realtimePreview,
-        localPreview: useStore.getState().rec.localPreview
+        localPreview: useStore.getState().rec.localPreview,
+        metaKey: tr.metaKey,
+        keywords: buildKeywordList()
       })
     )
     wsReady = true
@@ -509,10 +565,17 @@ export async function startRecording(): Promise<void> {
     const msg = JSON.parse(ev.data)
     const store = useStore.getState()
     if (msg.type === 'segment') {
+      // silence hallucination ("감사합니다" 류) — drop the chunk entirely (every engine passes here)
+      if (isWhisperHallucination(String(msg.text ?? ''))) {
+        bumpFinalizeStall()
+        return
+      }
       // tag the chunk with the focused PDF's current page (page↔chunk sync). null when no PDF
-      // is open/focused; the focused pane's page when the user is viewing during recording.
+      // is open/focused. With 교안 자동 넘김 on, the page tracker infers the page from the chunk
+      // text FIRST (and may turn the viewer), so the tag is the inferred page, not a stale one.
       const fid = store.focusedPdfId
-      const pdfPage = fid != null ? store.currentPdfPage[fid] ?? null : null
+      const inferred = liveEngine()?.inferPage(String(msg.text ?? ''), store.rec.liveSegments.length) ?? null
+      const pdfPage = fid != null ? (inferred ?? store.currentPdfPage[fid] ?? null) : null
       // offset by existing duration so appended takes get continuous timestamps
       store.appendLiveSegment({
         tStart: msg.tStart + baseOffset,
@@ -527,11 +590,24 @@ export async function startRecording(): Promise<void> {
       const st2 = useStore.getState()
       if (st2.rec.liveCorrect && st2.aiReady) {
         const agent = st2.agents.find((a) => a.id === st2.activeAgentId)
-        scheduleCorrection(st2.rec.liveSegments.length - 1 - FOLLOW_DELAY, correctionSystemPrompt(agent))
+        scheduleCorrection(st2.rec.liveSegments.length - 1 - followDelay(), correctionSystemPrompt(agent))
       }
       void maybeAutoTitle() // auto-name the note once ~2min of transcript has accumulated
+      // live-lecture pipelines (안내 감지 · 실시간 튜터) get the chunk AFTER it is in the store
+      liveEngine()?.onFinalSegment(st2.rec.liveSegments.length - 1)
     } else if (msg.type === 'partial') {
-      store.setRec({ partial: msg.text })
+      store.setRec({ partial: isWhisperHallucination(String(msg.text ?? '')) ? '' : msg.text })
+      liveEngine()?.onPartial(String(msg.text ?? ''))
+    } else if (msg.type === 'usage') {
+      // cloud billing basis (audio seconds sent per engine) → live ₩ cost text in the transcript header
+      const engine = String(msg.engine || 'meta')
+      store.setRec({
+        cloudUsage: {
+          ...store.rec.cloudUsage,
+          [engine]: { audioSec: Number(msg.audioSec) || 0, usdPerHour: Number(msg.usdPerHour) || 0.18, estimate: !!msg.estimate }
+        }
+      })
+      if (!store.fxUsdKrw) void window.api.fx.usdKrw().then((fx) => useStore.setState({ fxUsdKrw: fx })).catch(() => {})
     } else if (msg.type === 'finalizing') {
       store.setRec({ finalizeRemaining: Number(msg.remaining ?? 0) })
       bumpFinalizeStall()
@@ -669,6 +745,8 @@ export async function startRecording(): Promise<void> {
       useStore.getState().setRec({ sttError: STALL_MSG })
     }
   }, 2000)
+  // live-lecture pipelines (교안 자동 넘김 · 안내 감지 · 실시간 튜터) follow this session
+  LiveLectureEngine.start(memo.id)
   // (optimistic UI already set isRecording / recordingMemo / reset live at the top)
   starting = false
   // if stop was pressed after the last checkpoint (capture already live), tear down now
@@ -676,6 +754,126 @@ export async function startRecording(): Promise<void> {
     cancelStart = false
     void stopRecording()
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Import an existing recording and transcribe it after the fact. The file becomes a new take
+// appended to the memo (audio concatenated, segments offset by the memo's current duration) —
+// the same append semantics as recording another take.
+// ---------------------------------------------------------------------------------------------
+let importing = false
+
+export async function importAudioFile(): Promise<void> {
+  const st = useStore.getState()
+  if (session || starting || importing) return
+  const memo = st.memo
+  if (!memo) {
+    st.setRec({ sttError: '메모가 선택되지 않았습니다' })
+    return
+  }
+  let picked: { takePath: string; wavPath: string; durationSec: number; name: string } | null
+  try {
+    picked = await window.api.recordings.importAudio(memo.id)
+  } catch (e) {
+    st.showToast((e as Error).message)
+    return
+  }
+  if (!picked) return
+  importing = true
+  const memoId = memo.id
+  const base = { segments: memo.segments, durationSec: memo.durationSec || 0, audioPath: memo.audioPath, md: memo.transcriptMd }
+  const fail = async (msg: string): Promise<void> => {
+    importing = false
+    useStore.getState().setRec({ importing: null })
+    await window.api.recordings.discardImport([picked!.takePath, picked!.wavPath])
+    useStore.getState().showToast(msg)
+  }
+  useStore.getState().setRec({ importing: { name: picked.name, percent: 0 }, sttError: null })
+
+  const sidecar = await window.api.stt.ensure()
+  if (!sidecar.port) return fail(sidecar.error ?? 'STT 서버를 시작할 수 없습니다')
+
+  let segs: Segment[]
+  try {
+    segs = await new Promise<Segment[]>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${sidecar.port}`)
+      const done = (fn: () => void): void => {
+        try {
+          ws.close()
+        } catch {
+          /* ignore */
+        }
+        fn()
+      }
+      ws.onopen = () => {
+        void (async () => {
+          const r = useStore.getState().rec
+          const tr = await window.api.settings.getTranscribe()
+          ws.send(
+            JSON.stringify({
+              type: 'transcribe_file',
+              wavPath: picked!.wavPath,
+              model: r.model,
+              language: r.language,
+              initialPrompt: buildInitialPrompt(),
+              metaKey: tr.metaKey,
+              keywords: buildKeywordList()
+            })
+          )
+        })()
+      }
+      ws.onmessage = (ev) => {
+        if (typeof ev.data !== 'string') return
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'refine_progress') {
+          const cur = useStore.getState().rec.importing
+          if (cur) useStore.getState().setRec({ importing: { ...cur, percent: Number(msg.percent) || 0 } })
+        } else if (msg.type === 'refine_done') {
+          if (msg.usage?.engine === 'meta') {
+            const usage = { audioSec: Number(msg.usage.audioSec) || 0, usdPerHour: Number(msg.usage.usdPerHour) || 0.18 }
+            const cost = metaCostKrw(usage, useStore.getState().fxUsdKrw?.rate)
+            void window.api.usage.add({ ts: Date.now(), provider: 'meta', kind: 'file', audioSec: usage.audioSec, usd: cost.usd, estimate: false, memoId }).catch(() => {})
+            useStore.getState().showToast(`Meta 파일 전사 비용 약 ₩${cost.krw.toLocaleString('ko-KR')} ($${cost.usd.toFixed(3)})`)
+          }
+          done(() => resolve((msg.segments as Segment[]) ?? []))
+        } else if (msg.type === 'error') {
+          done(() => reject(new Error(msg.message)))
+        }
+      }
+      ws.onerror = () => done(() => reject(new Error('STT 연결 오류')))
+    })
+  } catch (e) {
+    return fail(`파일 전사 실패: ${(e as Error).message}`)
+  }
+
+  // ---- append onto the memo (fresh from DB — the user may have edited meanwhile) ----
+  const target = await window.api.memos.get(memoId)
+  const baseSegs = target?.segments ?? base.segments
+  const baseMd = target?.transcriptMd ?? base.md
+  const baseDur = target?.durationSec || base.durationSec
+  const newSegs: Segment[] = segs
+    .filter((x) => x.text.trim())
+    .filter((x) => !isWhisperHallucination(x.text))
+    .map((x) => ({ tStart: x.tStart + baseDur, tEnd: x.tEnd + baseDur, text: applyRuntime(x.text) }))
+  const allSegs = [...baseSegs, ...newSegs]
+  const agent = useStore.getState().agents.find((a) => a.id === (target?.agentId ?? useStore.getState().activeAgentId))
+  const rules = agent?.mathRules ?? {}
+  const reps = agent?.replacements ?? {}
+  const newMd = segmentsToMarkdown(newSegs, rules, reps)
+  const md = baseMd.trim() ? `${baseMd.trim()}\n\n${newMd}` : segmentsToMarkdown(allSegs, rules, reps)
+  try {
+    await window.api.recordings.finalizeTake(memoId, picked.takePath, baseDur + picked.durationSec, target?.audioPath ?? base.audioPath ?? undefined)
+  } catch (e) {
+    console.error('import finalize failed', e)
+  }
+  await window.api.recordings.discardImport([picked.wavPath])
+  await window.api.memos.updateTranscript(memoId, md, allSegs)
+  importing = false
+  const st2 = useStore.getState()
+  st2.setRec({ importing: null })
+  if (st2.selectedMemoId === memoId) await st2.reloadMemo()
+  await st2.refreshMemos()
+  st2.showToast(`${picked.name} 전사 완료 · ${newSegs.length}개 구간 추가`)
 }
 
 /** Temporarily pause: dropping frames freezes BOTH the transcript clock and the audio file
@@ -695,6 +893,7 @@ export function resumeRecording(): void {
   pausedMs += Date.now() - pauseStartMs
   pausedFlag = false
   useStore.getState().setRec({ paused: false })
+  liveEngine()?.intent.onManualResume() // a scheduled break auto-resume is moot now
 }
 
 /** Re-send the sidecar config for the active session — used to toggle the realtime
@@ -718,7 +917,9 @@ export async function reconfigureSession(): Promise<void> {
         apiKey: tr.apiKey,
         oaiModel: 'gpt-realtime-whisper',
         realtimePreview: tr.realtimePreview,
-        localPreview: st.rec.localPreview
+        localPreview: st.rec.localPreview,
+        metaKey: tr.metaKey,
+        keywords: buildKeywordList()
       })
     )
   } catch {
@@ -743,6 +944,10 @@ export async function stopRecording(): Promise<void> {
   stalled = false
   void window.api.window.setRecordingActive(false) // allow the Mac to sleep again
   const store = useStore.getState()
+  // live pipelines: cancel countdowns / embedding socket; the tutor flushes its last block and
+  // saves its cards (awaited below, after transcription has drained)
+  const live = liveEngine()
+  live?.stop()
 
   window.clearInterval(s.timer)
 
@@ -833,6 +1038,8 @@ export async function stopRecording(): Promise<void> {
     console.error('recording finalize failed', e)
   }
 
+  // let the 실시간 튜터 finish its last explanation + save its cards as a studio memo
+  if (live) await live.tutor.finished()
   // clear the live buffer BEFORE persisting so the new segments aren't shown twice
   useStore.getState().resetLive()
   await window.api.memos.updateTranscript(targetId, md, allSegs)
@@ -842,6 +1049,23 @@ export async function stopRecording(): Promise<void> {
   await st.refreshMemos() // update sidebar counts/previews
   st.setRecordingMemo(null)
   st.setRec({ finalizing: false, finalizeRemaining: 0, sttState: 'idle' })
+  // log this session's cloud usage (per engine) for the dashboard chart, and show the total
+  const usageEntries = Object.entries(st.rec.cloudUsage).filter(([, u]) => u.audioSec > 0)
+  if (usageEntries.length) {
+    let usdTotal = 0
+    let anyEstimate = false
+    for (const [engine, u] of usageEntries) {
+      const cost = metaCostKrw(u, st.fxUsdKrw?.rate)
+      usdTotal += cost.usd
+      anyEstimate ||= u.estimate
+      void window.api.usage
+        .add({ ts: Date.now(), provider: engine.startsWith('openai') ? 'openai' : engine, kind: engine === 'openai-realtime' ? 'preview' : 'live', audioSec: u.audioSec, usd: cost.usd, estimate: u.estimate, memoId: targetId })
+        .catch(() => {})
+    }
+    const krw = Math.round(usdTotal * (st.fxUsdKrw?.rate || 1350))
+    st.showToast(`이번 녹음 API 전사 비용 ${anyEstimate ? '추정 ' : '약 '}₩${krw.toLocaleString('ko-KR')} ($${usdTotal.toFixed(3)})`)
+    if (st.homeOpen) void st.refreshHome()
+  }
 
   // optional: auto-structure on stop — only when the recorded memo is in view
   // (structureMemo operates on the currently selected memo)

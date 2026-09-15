@@ -14,11 +14,11 @@ import {
   Star,
   StickyNote,
   Trash2,
-  Unlink
-} from 'lucide-react'
+  Unlink, Archive, ArchiveRestore } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import { NotesNav } from './notes/NotesNav'
 import { ChatNav } from './chat/ChatNav'
+import { UpdateBanner } from './UpdateBanner'
 import { getPdfPages, ocrIndexPdf } from '../lib/pdfText'
 import type { MemoSummary, PdfDoc } from '../../../shared/types'
 
@@ -353,6 +353,10 @@ export function Sidebar(): JSX.Element {
   const createFolder = useStore((s) => s.createFolder)
   const requestPrompt = useStore((s) => s.requestPrompt)
   const deleteFolder = useStore((s) => s.deleteFolder)
+  const setFolderArchived = useStore((s) => s.setFolderArchived)
+  const [archiveOpen, setArchiveOpen] = useState(false)
+  const visibleFolders = folders.filter((f) => !f.archived)
+  const archivedFolders = folders.filter((f) => f.archived)
   const createMemo = useStore((s) => s.createMemo)
   const sidebarCollapsed = useStore((s) => s.sidebarCollapsed)
   const homeOpen = useStore((s) => s.homeOpen)
@@ -442,6 +446,7 @@ export function Sidebar(): JSX.Element {
           >
             <MessageSquare size={18} />
           </button>
+          <UpdateBanner compact />
           <button onClick={() => createMemo()} className="no-drag rounded-lg p-2 text-accent hover:bg-black/5" title="새 노트">
             <SquarePen size={18} />
           </button>
@@ -466,7 +471,7 @@ export function Sidebar(): JSX.Element {
               </button>
             </div>
 
-            {folders.map((f) => {
+            {visibleFolders.map((f) => {
               const open = selectedFolderId === f.id && !collapsedFolders[f.id]
               const folderNotes = allMemos.filter((m) => m.folderId === f.id)
               // folder-level (inherited) PDFs of the currently-selected folder, shown above its notes
@@ -524,6 +529,17 @@ export function Sidebar(): JSX.Element {
                       <Paperclip size={12} />
                     </button>
                     <button
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void setFolderArchived(f.id, true)
+                        showToast(`'${f.name}' 폴더를 보관함으로 옮겼어요`)
+                      }}
+                      className="hidden rounded p-0.5 text-subtle hover:bg-black/10 hover:text-ink group-hover:block"
+                      title="보관 — 목록에서 숨기고 노트는 그대로 보관 (아래 보관함에서 복원)"
+                    >
+                      <Archive size={12} />
+                    </button>
+                    <button
                       onClick={() =>
                         requestConfirm(
                           folderNotes.length
@@ -560,15 +576,71 @@ export function Sidebar(): JSX.Element {
                 </div>
               )
             })}
+
+            {/* archived (unused) folders — collapsed at the bottom; restore puts one back in the list */}
+            {archivedFolders.length > 0 && (
+              <div className="mt-3">
+                <button
+                  onClick={() => setArchiveOpen((v) => !v)}
+                  className="no-drag flex w-full items-center gap-1 rounded-lg px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-subtle hover:bg-black/[0.03]"
+                >
+                  {archiveOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                  <Archive size={12} /> 보관함
+                  <span className="font-normal">{archivedFolders.length}</span>
+                </button>
+                {archiveOpen &&
+                  archivedFolders.map((f) => {
+                    const n = allMemos.filter((m) => m.folderId === f.id).length
+                    return (
+                      <div key={f.id} className="group flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] text-subtle no-drag hover:bg-black/[0.03]">
+                        <button
+                          onClick={() => void openFolderView(f.id)}
+                          className="flex flex-1 items-center gap-1 text-left"
+                          title="보관된 폴더 열기 (읽기는 그대로 가능)"
+                        >
+                          <span className="flex-1 truncate">{f.name}</span>
+                          <span className="text-[11px]">{n}</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            void setFolderArchived(f.id, false)
+                            showToast(`'${f.name}' 폴더를 복원했어요`)
+                          }}
+                          className="rounded p-0.5 hover:bg-black/10 hover:text-ink"
+                          title="복원 — 폴더 목록에 다시 표시"
+                        >
+                          <ArchiveRestore size={12} />
+                        </button>
+                        <button
+                          onClick={() =>
+                            requestConfirm(
+                              n ? `'${f.name}' 폴더를 삭제할까요? 강의 ${n}개와 그 안의 PDF·학습자료가 함께 영구 삭제돼요.` : `'${f.name}' 폴더를 삭제할까요?`,
+                              () => void deleteFolder(f.id)
+                            )
+                          }
+                          className="hidden rounded p-0.5 hover:bg-red-50 hover:text-red-500 group-hover:block"
+                          title="삭제"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    )
+                  })}
+              </div>
+            )}
           </div>
 
-          <div className="border-t border-black/5 p-2">
-            <button
-              onClick={() => createMemo()}
-              className="no-drag flex w-full items-center justify-center gap-2 rounded-xl bg-accent py-2.5 text-[13px] font-semibold text-white shadow-sm transition hover:bg-accent/90"
-            >
-              <SquarePen size={15} /> 새 노트
-            </button>
+          <div className="border-t border-black/5">
+            {/* auto-update row sits right above 새 노트 (download progress → restart button) */}
+            <UpdateBanner />
+            <div className="p-2">
+              <button
+                onClick={() => createMemo()}
+                className="no-drag flex w-full items-center justify-center gap-2 rounded-xl bg-accent py-2.5 text-[13px] font-semibold text-white shadow-sm transition hover:bg-accent/90"
+              >
+                <SquarePen size={15} /> 새 노트
+              </button>
+            </div>
           </div>
         </>
       )}

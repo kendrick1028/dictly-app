@@ -1,0 +1,107 @@
+# Windows installer build. The macOS dmg/zip is built and signed locally (scripts/build-dmg.sh) and
+# uploaded first; this job adds the NSIS exe + latest.yml to that same GitHub release.
+#
+# Triggers:
+#   • push of a v*.*.* tag            → builds that tag, uploads to the release of the same name
+#   • workflow_dispatch (tag input)   → builds the chosen ref (default: main), uploads to `tag`
+#
+# The STT sidecar needs a self-contained CPython; on Windows we lay down python-build-standalone
+# under python/runtime (python.exe at the root — see src/main/sttSidecar.ts) with faster-whisper
+# (CPU/CTranslate2). Whisper Live (MLX) is macOS-only and hidden in the Windows UI.
+name: release-windows
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to upload to (e.g. v0.6.1) — must equal package.json version'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  PBS_TAG: '20260901'
+  PBS_ASSET: 'cpython-3.11.16+20260901-x86_64-pc-windows-msvc-install_only.tar.gz'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve tag / version
+        id: meta
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          if [ "$TAG" != "v$VER" ]; then
+            echo "::error::tag $TAG ≠ package.json version $VER — latest.yml would advertise the wrong version"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Python sidecar runtime (python-build-standalone + faster-whisper)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o pbs.tar.gz \
+            "https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${PBS_ASSET}"
+          rm -rf python/runtime && mkdir -p python/runtime
+          # the tarball's top-level dir is `python/` → strip it so python.exe lands in python/runtime/
+          tar -xzf pbs.tar.gz -C python/runtime --strip-components=1
+          rm pbs.tar.gz
+          PY=python/runtime/python.exe
+          "$PY" --version
+          "$PY" -m pip install --no-cache-dir --upgrade pip
+          # requirements.txt already excludes mlx-whisper on non-darwin via its platform marker
+          "$PY" -m pip install --no-cache-dir -r python/requirements.txt
+          # trim what the sidecar never imports (stdlib tests, tk/idle) — keep site-packages tests
+          rm -rf python/runtime/Lib/test python/runtime/Lib/idlelib python/runtime/Lib/tkinter \
+                 python/runtime/tcl python/runtime/Doc 2>/dev/null || true
+          "$PY" -c "import faster_whisper, websockets, numpy; print('sidecar deps ok')"
+          du -sh python/runtime
+
+      - name: Build (electron-vite)
+        run: npm run build
+
+      - name: Package NSIS installer
+        shell: bash
+        run: npx electron-builder --win --publish never
+        env:
+          # no code-signing certificate → unsigned exe (SmartScreen "more info → run once")
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Show artifacts
+        shell: bash
+        run: ls -la dist/ && cat dist/latest.yml
+
+      - name: Upload to GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VER: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "Dictly $VER" --notes "Dictly $VER" --target "$GITHUB_SHA"
+          fi
+          gh release upload "$TAG" --clobber \
+            "dist/Dictly-${VER}-Setup.exe" \
+            "dist/Dictly-${VER}-Setup.exe.blockmap" \
+            dist/latest.yml
+          gh release view "$TAG" --json assets --jq '.assets[].name'

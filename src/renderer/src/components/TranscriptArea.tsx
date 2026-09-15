@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { Copy, Download, Loader2, MoreVertical, Search, Sparkles } from 'lucide-react'
+import { Coins, Copy, Download, FileAudio, Loader2, MoreVertical, Search, Sparkles } from 'lucide-react'
+import { importAudioFile, metaCostKrw } from '../audio/recorderController'
 import { useStore, type Tab } from '../store/useStore'
-import { RecordBar } from './RecordBar'
 import { TranscriptTab } from './tabs/TranscriptTab'
 import { StructuredTab } from './tabs/StructuredTab'
 import { RawTab } from './tabs/RawTab'
@@ -19,6 +19,40 @@ const BASE_TABS: { id: Tab; label: string }[] = [
 
 /** Middle column: transcript tab row + per-view actions (PDF toggle, copy, export) + body
  *  + floating record pill. Returns inner content; the caller wraps it in a section card. */
+/** Live cloud transcription cost (₩, converted with the cached USD→KRW rate) — visible while a cloud
+ *  engine (Meta, or the OpenAI realtime/batch paths) is being billed for this session. */
+function CloudCostText(): JSX.Element | null {
+  const usage = useStore((s) => s.rec.cloudUsage)
+  const fx = useStore((s) => s.fxUsdKrw)
+  const active = useStore((s) => s.rec.isRecording || s.rec.finalizing)
+  const entries = Object.entries(usage).filter(([, u]) => u.audioSec > 0)
+  if (!entries.length || !active) return null
+  const rate = fx?.rate ?? 1350
+  let usd = 0
+  let audioSec = 0
+  let estimate = false
+  for (const [, u] of entries) {
+    usd += metaCostKrw(u, rate).usd
+    audioSec = Math.max(audioSec, u.audioSec)
+    estimate ||= u.estimate
+  }
+  const krw = Math.round(usd * rate)
+  const when = fx?.at ? new Date(fx.at).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '기본값'
+  const m = Math.floor(audioSec / 60)
+  const sec = Math.floor(audioSec % 60)
+  const label = entries.map(([e, u]) => `${e === 'meta' ? 'Meta' : e === 'openai-realtime' ? 'OpenAI 실시간' : 'OpenAI 전사'} $${u.usdPerHour}/시간${u.estimate ? '(추정)' : ''}`).join(' · ')
+  return (
+    <span
+      className="mr-2 flex shrink-0 items-center gap-1 text-[12px] tabular-nums text-ink"
+      title={`${label} · 처리 오디오 ${m}분 ${sec}초 · 환율 $1 = ₩${rate.toLocaleString('ko-KR', { maximumFractionDigits: 1 })} (${fx?.source ?? 'fallback'}, ${when})`}
+    >
+      <Coins size={13} className="text-subtle" />
+      <span>{estimate ? '≈' : ''}₩{krw.toLocaleString('ko-KR')}</span>
+      <span className="text-subtle">(${usd.toFixed(3)})</span>
+    </span>
+  )
+}
+
 export function TranscriptArea(): JSX.Element {
   const memo = useStore((s) => s.memo)
   const activeTab = useStore((s) => s.activeTab)
@@ -28,6 +62,7 @@ export function TranscriptArea(): JSX.Element {
   const aiReady = useStore((s) => s.aiReady)
   const isRecording = useStore((s) => s.rec.isRecording)
   const recordingMemoId = useStore((s) => s.recordingMemoId)
+  const importing = useStore((s) => s.rec.importing)
   const [exportOpen, setExportOpen] = useState(false)
   const [mp4Saving, setMp4Saving] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
@@ -106,7 +141,7 @@ export function TranscriptArea(): JSX.Element {
           <button
             key={t.id}
             onClick={() => setTab(t.id)}
-            className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
+            className={`shrink-0 whitespace-nowrap rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
               activeTab === t.id ? 'bg-black/[0.06] text-ink' : 'text-subtle hover:bg-black/[0.04]'
             }`}
           >
@@ -114,22 +149,23 @@ export function TranscriptArea(): JSX.Element {
           </button>
         ))}
         <div className="flex-1" />
+        <CloudCostText />
         {/* right-aligned action group: 검색 · 목차 · 더보기(복사·MP4·내보내기) */}
         {activeTab === 'transcript' && (
           <button
             onClick={() => setSearchOpen((v) => !v)}
-            className={`rounded-lg p-1.5 transition hover:bg-black/5 ${searchOpen ? 'bg-black/[0.06] text-accent' : 'text-subtle'}`}
+            className={`shrink-0 rounded-lg p-1.5 transition hover:bg-black/5 ${searchOpen ? 'bg-black/[0.06] text-accent' : 'text-subtle'}`}
             title="전사문에서 검색"
           >
             <Search size={16} />
           </button>
         )}
         {activeTab === 'transcript' && (
-          <div className="group/oc relative">
+          <div className="group/oc relative shrink-0">
             <button
               onClick={() => void outlineMemo()}
               disabled={busy.outline || !transcriptHasContent || outlineLive || !aiReady}
-              className="flex items-center gap-1 rounded-lg px-1.5 py-1.5 text-[11px] text-subtle hover:bg-black/5 disabled:opacity-40"
+              className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg px-1.5 py-1.5 text-[11px] text-subtle hover:bg-black/5 disabled:opacity-40"
             >
               {busy.outline ? <Loader2 size={16} className="animate-spin text-subtle" /> : <Sparkles size={16} />}
               <span>목차</span>
@@ -139,7 +175,7 @@ export function TranscriptArea(): JSX.Element {
             </div>
           </div>
         )}
-        <div className="relative" ref={exportRef}>
+        <div className="relative shrink-0" ref={exportRef}>
           <button onClick={() => setExportOpen((v) => !v)} className="rounded-lg p-1.5 text-subtle hover:bg-black/5" title="더보기 (복사 · MP4 · 내보내기)">
             <MoreVertical size={16} />
           </button>
@@ -166,6 +202,17 @@ export function TranscriptArea(): JSX.Element {
                   {mp4Saving ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} className="text-subtle" />} 녹음 MP4로 저장
                 </button>
               )}
+              <button
+                onClick={() => {
+                  setExportOpen(false)
+                  void importAudioFile()
+                }}
+                disabled={!memo || isRecording || !!importing}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[13px] hover:bg-black/5 disabled:opacity-50"
+                title="이미 녹음된 파일을 골라 이 노트에 이어서 전사"
+              >
+                <FileAudio size={14} className="text-subtle" /> 녹음 파일 가져와 전사
+              </button>
               <div className="my-1 border-t border-black/5" />
               <div className="px-3 py-1 text-[10.5px] font-semibold uppercase tracking-wide text-subtle/70">내보내기</div>
               {(['markdown', 'text', 'html', 'pdf'] as ExportFormat[]).map((f) => (
@@ -182,13 +229,12 @@ export function TranscriptArea(): JSX.Element {
         </div>
       </div>
       <div className="relative min-h-0 flex-1">
-        <div className="absolute inset-x-0 top-0 bottom-[88px] overflow-hidden">
+        <div className="absolute inset-0 overflow-hidden">
           {activeTab === 'transcript' && <TranscriptTab searchOpen={searchOpen} onCloseSearch={() => setSearchOpen(false)} />}
           {activeTab === 'structured' && <StructuredTab />}
           {activeTab === 'raw' && <RawTab />}
           {activeTab === 'bookmarks' && <BookmarksTab />}
         </div>
-        <RecordBar />
       </div>
     </div>
   )

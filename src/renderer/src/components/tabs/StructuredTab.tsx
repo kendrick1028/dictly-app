@@ -121,7 +121,7 @@ export function StructuredTab(): JSX.Element {
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-6">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-28">
         {loading && (
           <div className="mb-3 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-[13px] text-accent">
             <Loader2 size={14} className="animate-spin" /> 맥락 단위로 정리하는 중이에요

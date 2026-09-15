@@ -14,7 +14,9 @@ import type {
   Segment,
   AudioSource,
   TranscribeModel,
+  SttLanguage,
   ProviderStatus,
+  AgyModel,
   AiEngine,
   ConnectionMode,
   AiStatus,
@@ -23,20 +25,28 @@ import type {
   NoteSummary,
   StudioItem,
   StudioKind,
-  PdfDoc
+  PdfDoc,
+  LiveTutorCard
 } from '../../../shared/types'
 import { applyReplacements, segmentsToMarkdown } from '../math/koMathRules'
+import { isWhisperHallucination } from '../../../shared/hallucination'
 import { parseStructure, parseOutline, parseResegment, buildStructuredSegments, buildOutlinedSegments, buildResegmented, isHeading } from '../lib/structure'
 import { clearPdfDocCache } from '../pdf/pdfCache'
 import type { StudioJob } from '../lib/studioJobs'
 import { getAccentTheme, persistAccentTheme, type AccentTheme } from '../lib/theme'
+import { notesForVersion, type ReleaseNotes } from '../lib/releaseNotes'
 
 /** left-pane transcript views */
 export type Tab = 'transcript' | 'structured' | 'raw' | 'bookmarks'
-/** Studio surface mode: hub grid (default) / chat / saved-item viewer / live Feynman session.
+/** Studio surface mode: hub grid (default) / chat / saved-item viewer / live Feynman session / live 튜터 session.
  *  (Generation runs as background jobs — lib/studioJobs — shown as rows in the hub list.)
- *  feynman.itemId 0 = brand-new session (FeynmanSession generates questions then swaps in the real id). */
-export type StudioView = { mode: 'hub' } | { mode: 'chat' } | { mode: 'viewer'; itemId: number } | { mode: 'feynman'; itemId: number }
+ *  feynman/tutor itemId 0 = brand-new session (the session component creates the item then swaps in the real id). */
+export type StudioView =
+  | { mode: 'hub' }
+  | { mode: 'chat' }
+  | { mode: 'viewer'; itemId: number }
+  | { mode: 'feynman'; itemId: number }
+  | { mode: 'tutor'; itemId: number }
 
 /** annotation undo ops (per pdf) */
 /** undo/redo op: restore one annotation (by stable id) to a before/after snapshot */
@@ -105,6 +115,11 @@ function applyAnnSnap(opId: string, snap: Annotation | null): void {
 }
 
 const PANEL_SIZES_KEY = 'dictly.panelSizes'
+/** what's-new pages to show when the running version has no entry (설정 → 새 기능 보기) */
+const RELEASE_FALLBACK_VERSION = '0.6.1'
+/** dev and packaged builds share one DB — keep the "already seen" flag separate so testing the popup
+ *  in dev never hides it from the installed app */
+const WHATS_NEW_SEEN_KEY = import.meta.env.DEV ? 'whatsNew.seen.dev' : 'whatsNew.seen'
 /** active engine connected & usable, accounting for CLI vs API mode */
 function aiReadyFrom(ai: AiStatus): boolean {
   if (ai.connectionMode === 'api') {
@@ -113,6 +128,7 @@ function aiReadyFrom(ai: AiStatus): boolean {
     return ai.anthropicKeySet
   }
   if (ai.engine === 'gpt') return ai.gpt.loggedIn
+  if (ai.engine === 'antigravity') return ai.antigravity.loggedIn
   return ai.claude.installed // claude or gemini-fallback
 }
 let panelSaveTimer: ReturnType<typeof setTimeout> | null = null
@@ -146,8 +162,14 @@ export function isDefaultTitle(t: string): boolean {
 interface RecordingState {
   isRecording: boolean
   source: AudioSource
-  language: string
+  /** transcription language: ko | en | auto (per-utterance detection) — persisted */
+  language: SttLanguage
   model: TranscribeModel
+  /** an imported audio file is being transcribed after the fact (blocks recording meanwhile) */
+  importing: { name: string; percent: number } | null
+  /** cloud transcription usage for the current session, per engine (audio seconds sent, $/h,
+   *  estimate flag) — drives the live ₩ cost text and the usage log written at stop */
+  cloudUsage: Record<string, { audioSec: number; usdPerHour: number; estimate: boolean }>
   /** auto-run the structuring pass when recording stops */
   structureOnStop: boolean
   elapsedSec: number
@@ -165,6 +187,8 @@ interface RecordingState {
   paused: boolean
   /** correct each chunk with Claude as it is transcribed */
   liveCorrect: boolean
+  /** chunks to wait for AFTER a chunk before correcting it (context vs latency; 0 = immediately) — persisted */
+  correctFollowDelay: number
   /** show the local (base-model) live preview; turn OFF to give finals 100% of the GPU */
   localPreview: boolean
   /** live-segment indices currently being corrected by Claude (for shimmer UI) */
@@ -179,9 +203,16 @@ async function bakeAndPersist(memo: Memo | null, get: () => StoreState): Promise
   if (!memo || !memo.segments.length || get().recordingMemoId === memo.id) return memo
   const agent = get().agents.find((a) => a.id === (memo.agentId ?? get().activeAgentId))
   const reps = agent?.replacements ?? {}
-  if (!Object.keys(reps).length) return memo
-  let changed = false
-  const baked = memo.segments.map((s) => {
+  // one-time cleanup of silence hallucinations ("감사합니다" 류) recorded before the filter existed
+  // (bookmarks are keyed by tStart, so dropping chunks never shifts them)
+  const kept = memo.segments.filter((s) => !isWhisperHallucination(s.text))
+  let changed = kept.length !== memo.segments.length
+  if (!Object.keys(reps).length) {
+    if (!changed) return memo
+    await window.api.memos.updateTranscript(memo.id, segmentsToMarkdown(kept, {}, reps), kept)
+    return { ...memo, segments: kept }
+  }
+  const baked = kept.map((s) => {
     if (s.origText != null) return s // already baked
     const corrected = applyReplacements(s.text, reps)
     if (corrected === s.text) return s
@@ -200,6 +231,8 @@ interface StoreState {
   claude: ClaudeStatus | null
   /** Codex (GPT) provider status */
   gpt: ProviderStatus | null
+  /** Antigravity (agy) provider status */
+  antigravity: ProviderStatus | null
   /** CLI 연결 vs API 연결 */
   connectionMode: ConnectionMode
   /** which provider runs heavy tasks (정리/요약/퀴즈/채팅) */
@@ -210,6 +243,9 @@ interface StoreState {
   gptReasoning: string
   /** Claude reasoning effort (low|medium|high|xhigh|max) */
   claudeEffort: string
+  /** Antigravity model slug ('' = CLI default) + the models the CLI lists */
+  agyModel: string
+  agyModels: AgyModel[]
   /** whether each API-mode key is saved */
   anthropicKeySet: boolean
   geminiKeySet: boolean
@@ -221,10 +257,16 @@ interface StoreState {
   transcribeEngine: string
   /** whether an OpenAI API key is saved */
   openaiKeySet: boolean
+  /** whether a Meta Model API key is saved (Meta transcription engine) */
+  metaKeySet: boolean
+  /** USD→KRW rate for the Meta cost display (null until loaded) */
+  fxUsdKrw: { rate: number; at: number; source: string } | null
   /** OpenAI transcription model id */
   transcribeModel: string
   /** overlay live preview via OpenAI Realtime (finals stay on the chosen engine) */
   realtimePreview: boolean
+  /** sticky usage-limit fallback in effect (see ipc withFallback) */
+  aiFallback: { from: string; to: string; since: number } | null
   /** active engine is connected & ready (gates heavy-task buttons) */
   aiReady: boolean
   /** connect modal open */
@@ -258,6 +300,10 @@ interface StoreState {
   agentManagerMemoScope: boolean
   timetableOpen: boolean
   settingsOpen: boolean
+  /** "신기능 출시" pages shown once after an update */
+  whatsNewOpen: boolean
+  whatsNewNotes: ReleaseNotes | null
+  appVersion: string
   /** app-wide Spotlight search overlay open */
   spotlightOpen: boolean
   /** Spotlight global shortcut, serialized (e.g. "Meta+Shift+KeyF"); persisted in localStorage */
@@ -304,6 +350,8 @@ interface StoreState {
   studioItems: StudioItem[]
   /** in-flight background generations (hub filters by scope target) */
   studioJobs: StudioJob[]
+  /** options carried from the AI 튜터 options modal into a brand-new TutorSession (itemId 0) */
+  tutorPendingOpts: { mode: 'learn' | 'sprint'; subject: string } | null
   // ---- Folder view (소스 | 미리보기 | 스튜디오) ----
   /** main area shows the 3-pane folder view */
   folderOpen: boolean
@@ -321,7 +369,41 @@ interface StoreState {
     | { kind: 'pdf'; pdf: PdfDoc; page?: number; nonce: number }
     | { kind: 'note'; noteId: number; nonce: number }
     | null
+  /** folder page: 소스 pane collapsed to a narrow rail */
+  folderSourcesCollapsed: boolean
+  /** folder page: 미리보기 pane collapsed (reopen via source-row / 폴더 제목 buttons) */
+  folderPreviewCollapsed: boolean
   /** studio collapsed to a narrow icon rail */
+  // ---- live lecture pipelines (교안 자동 넘김 · 안내 감지 · 실시간 튜터) ----
+  /** auto page-turn of the focused 교안 from live transcript chunks */
+  autoPage: {
+    on: boolean
+    status: 'off' | 'following' | 'paused' | 'lost' | 'noText' | 'noPdf'
+    engine: 'lexical' | 'lexical+embed'
+    lastTurnAt: number
+    lastAutoPage: number | null
+    /** transient per-pane flash after an auto turn (pdfId → page) */
+    flash: { pdfId: number; page: number; at: number } | null
+    /** last chunk analysis (drives the "listening" blip + match readout on the PDF pill) */
+    scan: { at: number; page: number | null; score: number; challenger: number | null; challengerVotes: number } | null
+  }
+  /** "쉬는 시간 / 수업 끝" announcement detection → auto pause / stop */
+  lectureIntent: {
+    on: boolean
+    /** what an end-of-class announcement does: stop after a countdown, or only suggest */
+    endAction: 'stop' | 'suggest'
+    pending: { kind: 'break' | 'end'; minutes: number | null; toastId: number } | null
+    /** when a detected break auto-resumes (ms epoch), null = none scheduled */
+    resumeAt: number | null
+  }
+  /** 실시간 튜터 side panel (mutually exclusive with the studio panel) */
+  liveTutorOpen: boolean
+  liveTutor: {
+    status: 'idle' | 'listening' | 'thinking' | 'paused'
+    cards: LiveTutorCard[]
+    streaming: { cardId: string; md: string; tStart?: number; tEnd?: number; pdfPage?: number | null } | null
+    error: string | null
+  }
   studioCollapsed: boolean
   /** studio expanded to fill the whole note area (single-section fullscreen) */
   studioFullscreen: boolean
@@ -338,7 +420,9 @@ interface StoreState {
   /** handwriting annotations for the open memo */
   annotations: Annotation[]
   /** active annotation tool (shared across the focused viewer) */
-  annTool: 'none' | 'pen' | 'highlighter' | 'eraser' | 'underline' | 'memo' | 'lasso'
+  annTool: 'none' | 'pen' | 'highlighter' | 'eraser' | 'underline' | 'memo' | 'lasso' | 'text'
+  /** default font size for new text annotations (normalized to page width) */
+  annTextSize: number
   annColor: string
   annWidth: number
   annRuler: boolean
@@ -359,6 +443,8 @@ interface StoreState {
   openStudioItem: (item: StudioItem) => void
   /** start a brand-new Feynman review session (FeynmanSession generates questions) */
   startFeynmanReview: () => void
+  /** start a brand-new AI 튜터 session with the options chosen in the modal */
+  startTutorSession: (opts: { mode: 'learn' | 'sprint'; subject: string }) => void
   /** citation chip click: play transcript at t + center that chunk. folder scope: memoId is the
    *  chip-resolved source-memo (from the chat/viewer sources); memoIndex is a fallback. */
   jumpToTime: (t: number, memoIndex?: number, memoId?: number) => void
@@ -377,7 +463,18 @@ interface StoreState {
   setFolderSrcPdfIds: (ids: number[]) => void
   setFolderSrcNoteIds: (ids: number[]) => void
   setFolderPreview: (p: StoreState['folderPreview']) => void
+  toggleFolderSourcesCollapsed: () => void
+  setFolderPreviewCollapsed: (collapsed: boolean) => void
   toggleStudioCollapsed: () => void
+  setAutoPage: (patch: Partial<StoreState['autoPage']>) => void
+  setLectureIntent: (patch: Partial<StoreState['lectureIntent']>) => void
+  /** open/close the 실시간 튜터 panel (opening collapses the studio; the engine keeps running either way) */
+  toggleLiveTutor: (open?: boolean) => void
+  setLiveTutor: (patch: Partial<StoreState['liveTutor']>) => void
+  pushLiveTutorCard: (card: LiveTutorCard) => void
+  updateLiveTutorCard: (id: string, patch: Partial<LiveTutorCard>) => void
+  /** retro-tag a live chunk with an inferred 교안 page (auto page-turn) */
+  setLiveSegmentPage: (index: number, pdfId: number | null, page: number | null) => void
   toggleStudioFullscreen: () => void
   setPanelSizes: (key: string, sizes: number[]) => void
   requestAudioSeek: (t: number) => void
@@ -387,6 +484,7 @@ interface StoreState {
   setAnnColor: (c: string) => void
   setAnnWidth: (w: number) => void
   toggleAnnRuler: () => void
+  setAnnTextSize: (v: number) => void
   addAnnotationLocal: (a: Omit<Annotation, 'id' | 'createdAt'>) => string
   updateAnnotationLocal: (id: string, patch: Partial<Pick<Annotation, 'data' | 'tSec'>>, immediate?: boolean) => void
   deleteAnnotationLocal: (id: string) => void
@@ -410,6 +508,8 @@ interface StoreState {
   selectFolder: (id: number | null) => Promise<void>
   refreshMemos: () => Promise<void>
   toggleFavorite: (kind: 'folder' | 'memo', id: number, fav: boolean) => Promise<void>
+  /** archive (hide from the sidebar) or restore a folder; its notes are untouched */
+  setFolderArchived: (id: number, archived: boolean) => Promise<void>
   selectMemo: (id: number) => Promise<void>
   reloadMemo: () => Promise<void>
   setTab: (t: Tab) => void
@@ -420,6 +520,8 @@ interface StoreState {
   setBusy: (patch: Partial<StoreState['busy']>) => void
   setClaudeModel: (model: string) => void
   refreshAiStatus: () => Promise<void>
+  /** "다시 시도": clear the sticky fallback and re-probe the primary provider */
+  clearAiFallback: () => Promise<void>
   setConnectOpen: (open: boolean) => void
   enterCompact: () => Promise<void>
   exitCompact: () => Promise<void>
@@ -434,14 +536,22 @@ interface StoreState {
   setGptModel: (model: string) => Promise<void>
   setGptReasoning: (effort: string) => Promise<void>
   setClaudeEffort: (effort: string) => Promise<void>
+  setAgyModel: (model: string) => Promise<void>
   setAnthropicKey: (key: string) => Promise<void>
   setGeminiKey: (key: string) => Promise<void>
   setApiModel: (provider: 'claude' | 'gpt' | 'gemini', model: string) => Promise<void>
   setTranscribeEngine: (engine: string) => Promise<void>
   setOpenaiKey: (key: string) => Promise<void>
   setTranscribeModel: (model: string) => Promise<void>
-  /** local Whisper model: 'turbo' (fast) | 'large-v3' (accurate) — persisted, applies next recording */
+  /** local Whisper model: 'turbo' (fast) | 'large-v3' (accurate) | 'live' (streaming) — persisted, applies next recording */
   setSttModel: (model: TranscribeModel) => Promise<void>
+  /** transcription language (ko | en | auto) — persisted, applies next recording */
+  setSttLanguage: (lang: SttLanguage) => Promise<void>
+  /** Meta Model API key for the Meta (Muse Voice Transcribe) engine — empty string clears it */
+  setMetaKey: (key: string) => Promise<void>
+  setCorrectFollowDelay: (n: number) => Promise<void>
+  /** 시스템/마이크 — remembered across launches (no fixed default) */
+  setAudioSource: (source: AudioSource) => Promise<void>
   setRealtimePreview: (on: boolean) => Promise<void>
   setRecordingMemo: (id: number | null) => void
   structureMemo: () => Promise<void>
@@ -473,6 +583,9 @@ interface StoreState {
   toggleNotesPanel: () => Promise<void>
   openMemoAt: (memoId: number | null, loc: { t?: number; pdfId?: number; page?: number }) => Promise<void>
   setSettingsOpen: (open: boolean) => void
+  /** reopen the what's-new pages for the running version (settings) */
+  openWhatsNew: () => void
+  closeWhatsNew: () => void
   openSpotlight: () => void
   closeSpotlight: () => void
   toggleSpotlight: () => void
@@ -494,7 +607,8 @@ interface StoreState {
   // recording (real impl wired in recorder controller)
   setRec: (patch: Partial<RecordingState>) => void
   appendLiveSegment: (seg: Segment) => void
-  updateLiveSegment: (index: number, text: string) => void
+  /** `translation` (optional): Korean translation to attach alongside the corrected text */
+  updateLiveSegment: (index: number, text: string, translation?: string | null) => void
   updateLiveSegmentTimed: (index: number, text: string, tStart: number, tEnd: number) => void
   mergeLiveSegments: (prevIndex: number, index: number, text: string) => void
   markCorrecting: (index: number, active: boolean) => void
@@ -507,11 +621,14 @@ export const useStore = create<StoreState>((set, get) => ({
   agents: [],
   claude: null,
   gpt: null,
+  antigravity: null,
   connectionMode: 'cli',
   aiEngine: 'claude',
   gptModel: 'gpt-5.6-terra',
   gptReasoning: 'low',
   claudeEffort: 'low',
+  agyModel: '',
+  agyModels: [],
   anthropicKeySet: false,
   geminiKeySet: false,
   anthropicApiModel: '',
@@ -519,8 +636,11 @@ export const useStore = create<StoreState>((set, get) => ({
   geminiApiModel: '',
   transcribeEngine: 'local',
   openaiKeySet: false,
+  metaKeySet: false,
+  fxUsdKrw: null,
   transcribeModel: 'gpt-4o-transcribe',
   realtimePreview: false,
+  aiFallback: null,
   aiReady: false,
   connectOpen: false,
   compactMode: false,
@@ -555,6 +675,9 @@ export const useStore = create<StoreState>((set, get) => ({
   lectureNoteId: null,
   timetableOpen: false,
   settingsOpen: false,
+  whatsNewOpen: false,
+  whatsNewNotes: null,
+  appVersion: '',
   spotlightOpen: false,
   spotlightShortcut: localStorage.getItem('dictly.spotlightShortcut') || DEFAULT_SPOTLIGHT_SHORTCUT,
   accentTheme: getAccentTheme(),
@@ -567,6 +690,7 @@ export const useStore = create<StoreState>((set, get) => ({
   studioScope: 'memo',
   studioItems: [],
   studioJobs: [],
+  tutorPendingOpts: null,
   folderOpen: false,
   folderPdfs: [],
   folderNotes: [],
@@ -574,6 +698,12 @@ export const useStore = create<StoreState>((set, get) => ({
   folderSrcPdfIds: [],
   folderSrcNoteIds: [],
   folderPreview: null,
+  folderSourcesCollapsed: false,
+  folderPreviewCollapsed: false,
+  autoPage: { on: false, status: 'off', engine: 'lexical', lastTurnAt: 0, lastAutoPage: null, flash: null, scan: null },
+  lectureIntent: { on: false, endAction: 'stop', pending: null, resumeAt: null },
+  liveTutorOpen: false,
+  liveTutor: { status: 'idle', cards: [], streaming: null, error: null },
   studioCollapsed: false,
   studioFullscreen: false,
   panelSizes: {},
@@ -586,6 +716,7 @@ export const useStore = create<StoreState>((set, get) => ({
   annColor: '#ef4444',
   annWidth: 0.003,
   annRuler: false,
+  annTextSize: 0.018,
   annUndo: {},
   annRedo: {},
   rec: {
@@ -593,6 +724,8 @@ export const useStore = create<StoreState>((set, get) => ({
     source: 'system',
     language: 'ko',
     model: 'turbo',
+    importing: null,
+    cloudUsage: {},
     structureOnStop: false,
     elapsedSec: 0,
     liveSegments: [],
@@ -603,6 +736,7 @@ export const useStore = create<StoreState>((set, get) => ({
     finalizeRemaining: 0,
     paused: false,
     liveCorrect: true,
+    correctFollowDelay: 2,
     localPreview: false,
     correctingIdx: []
   },
@@ -628,11 +762,14 @@ export const useStore = create<StoreState>((set, get) => ({
       agents,
       claude: ai.claude,
       gpt: ai.gpt,
+      antigravity: ai.antigravity,
       connectionMode: ai.connectionMode,
       aiEngine: ai.engine,
       gptModel: ai.gptModel,
       gptReasoning: ai.gptReasoning,
       claudeEffort: ai.claudeEffort,
+      agyModel: ai.agyModel,
+      agyModels: ai.agyModels,
       anthropicKeySet: ai.anthropicKeySet,
       geminiKeySet: ai.geminiKeySet,
       anthropicApiModel: ai.anthropicApiModel,
@@ -640,6 +777,8 @@ export const useStore = create<StoreState>((set, get) => ({
       geminiApiModel: ai.geminiApiModel,
       transcribeEngine: ai.transcribeEngine,
       openaiKeySet: ai.openaiKeySet,
+      metaKeySet: ai.metaKeySet,
+      aiFallback: ai.fallback ?? null,
       transcribeModel: ai.transcribeModel,
       realtimePreview: ai.realtimePreview,
       aiReady: aiReadyFrom(ai),
@@ -647,15 +786,43 @@ export const useStore = create<StoreState>((set, get) => ({
       activeAgentId: agents[0]?.id ?? null,
       ready: true
     })
-    get().setRec({ model: ai.sttModel }) // restore the saved local Whisper model (turbo | large-v3)
-    if (folders[0]) await get().selectFolder(folders[0].id)
+    get().setRec({ model: ai.sttModel, language: ai.sttLanguage, correctFollowDelay: ai.correctFollowDelay }) // restore persisted recording prefs
+    // last-used input source (시스템/마이크) — remembered, not defaulted
+    void window.api.prefs.get('audioSource').then((v) => {
+      if (v === 'mic' || v === 'system') get().setRec({ source: v })
+    })
+    // "신기능 출시" pages: once per version, on the first launch after an update
+    void Promise.all([window.api.app.version(), window.api.prefs.get(WHATS_NEW_SEEN_KEY)]).then(([version, seen]) => {
+      set({ appVersion: version })
+      const notes = notesForVersion(version)
+      if (notes && seen !== version) set({ whatsNewOpen: true, whatsNewNotes: notes })
+    })
+    // 실시간 강의 보조 prefs (교안 자동 넘김 · 안내 감지)
+    void Promise.all([window.api.prefs.get('live.autoPage'), window.api.prefs.get('live.intent'), window.api.prefs.get('live.intentEnd')]).then(([ap, li, le]) => {
+      set((s) => ({
+        autoPage: { ...s.autoPage, on: ap === '1', status: ap === '1' ? 'noPdf' : 'off' },
+        lectureIntent: { ...s.lectureIntent, on: li === '1', endAction: le === 'suggest' ? 'suggest' : 'stop' }
+      }))
+    })
+    // no folder is auto-selected on launch — the dashboard opens with every folder collapsed
+    await get().selectFolder(null)
     // pre-warm the STT sidecar (spawn python + open port) in the background so the FIRST
     // recording starts instantly instead of waiting for the process to boot.
     void window.api.stt.ensure().catch(() => {})
+    // exchange rate for the Meta cost pill (cached in main; offline fallback)
+    void window.api.fx.usdKrw().then((fx) => set({ fxUsdKrw: fx })).catch(() => {})
     void get().refreshHome() // prefetch so the Home tab renders instantly
     void get().refreshNotes() // prefetch note summaries for the 메모 tab
     // auto provider-fallback: notify when a task switched providers on a usage/quota limit
-    window.api.ai.onFallback?.(({ from, to }) => get().showToast(`${from} 한도 초과 — ${to}로 전환했어요`))
+    // (one toast per switch — afterwards tasks stay on the fallback provider without re-notifying)
+    window.api.ai.onFallback?.(({ from, to }) => {
+      set({ aiFallback: { from, to, since: Date.now() } })
+      toastApi.warning(`${from} 사용량 한도 초과 — 한도가 풀릴 때까지 ${to}로 계속 동작해요`, {
+        duration: 7000,
+        action: `${from}로 다시 시도`,
+        onAction: () => void get().clearAiFallback()
+      })
+    })
   },
 
   refreshAiStatus: async () => {
@@ -663,11 +830,14 @@ export const useStore = create<StoreState>((set, get) => ({
     set({
       claude: ai.claude,
       gpt: ai.gpt,
+      antigravity: ai.antigravity,
       connectionMode: ai.connectionMode,
       aiEngine: ai.engine,
       gptModel: ai.gptModel,
       gptReasoning: ai.gptReasoning,
       claudeEffort: ai.claudeEffort,
+      agyModel: ai.agyModel,
+      agyModels: ai.agyModels,
       anthropicKeySet: ai.anthropicKeySet,
       geminiKeySet: ai.geminiKeySet,
       anthropicApiModel: ai.anthropicApiModel,
@@ -675,10 +845,16 @@ export const useStore = create<StoreState>((set, get) => ({
       geminiApiModel: ai.geminiApiModel,
       transcribeEngine: ai.transcribeEngine,
       openaiKeySet: ai.openaiKeySet,
+      metaKeySet: ai.metaKeySet,
+      aiFallback: ai.fallback ?? null,
       transcribeModel: ai.transcribeModel,
       realtimePreview: ai.realtimePreview,
       aiReady: aiReadyFrom(ai)
     })
+  },
+  clearAiFallback: async () => {
+    await window.api.ai.clearFallback()
+    set({ aiFallback: null })
   },
   setConnectOpen: (open) => set({ connectOpen: open }),
   enterCompact: async () => {
@@ -736,6 +912,10 @@ export const useStore = create<StoreState>((set, get) => ({
     await window.api.ai.setClaudeEffort(effort)
     set({ claudeEffort: effort })
   },
+  setAgyModel: async (model) => {
+    await window.api.ai.setAgyModel(model)
+    set({ agyModel: model })
+  },
   setTranscribeEngine: async (engine) => {
     await window.api.ai.setTranscribeEngine(engine)
     set({ transcribeEngine: engine })
@@ -752,6 +932,22 @@ export const useStore = create<StoreState>((set, get) => ({
   setSttModel: async (model) => {
     get().setRec({ model })
     await window.api.ai.setSttModel(model)
+  },
+  setSttLanguage: async (lang) => {
+    get().setRec({ language: lang })
+    await window.api.ai.setSttLanguage(lang)
+  },
+  setMetaKey: async (key) => {
+    await window.api.ai.setMetaKey(key)
+    set({ metaKeySet: !!key.trim() })
+  },
+  setCorrectFollowDelay: async (n) => {
+    get().setRec({ correctFollowDelay: n })
+    await window.api.ai.setCorrectFollowDelay(n)
+  },
+  setAudioSource: async (source) => {
+    get().setRec({ source })
+    await window.api.prefs.set('audioSource', source)
   },
   setRealtimePreview: async (on) => {
     await window.api.ai.setRealtimePreview(on)
@@ -812,6 +1008,7 @@ export const useStore = create<StoreState>((set, get) => ({
       notesOpen: false,
       notesPanelOpen: false,
       lectureNoteId: null,
+      liveTutorOpen: false, // the 실시간 튜터 panel belongs to the recording memo (engine keeps running)
       studioItems: []
     })
     void get().refreshStudioItems()
@@ -1065,6 +1262,15 @@ export const useStore = create<StoreState>((set, get) => ({
     if (get().homeOpen) await get().refreshHome()
   },
   setSettingsOpen: (open) => set({ settingsOpen: open }),
+  openWhatsNew: () => {
+    const notes = notesForVersion(get().appVersion) ?? notesForVersion(RELEASE_FALLBACK_VERSION)
+    if (notes) set({ whatsNewOpen: true, whatsNewNotes: notes })
+  },
+  closeWhatsNew: () => {
+    const v = get().appVersion
+    set({ whatsNewOpen: false })
+    if (v) void window.api.prefs.set(WHATS_NEW_SEEN_KEY, v)
+  },
   openSpotlight: () => set({ spotlightOpen: true }),
   closeSpotlight: () => set({ spotlightOpen: false }),
   toggleSpotlight: () => set((s) => ({ spotlightOpen: !s.spotlightOpen })),
@@ -1112,7 +1318,13 @@ export const useStore = create<StoreState>((set, get) => ({
       return { openPdfIds: next, focusedPdfId: s.focusedPdfId === id ? next[0] ?? null : s.focusedPdfId }
     }),
   setFocusedPdf: (id) => set({ focusedPdfId: id }),
-  setCurrentPdfPage: (pdfId, page) => set((s) => ({ currentPdfPage: { ...s.currentPdfPage, [pdfId]: page } })),
+  setCurrentPdfPage: (pdfId, page) =>
+    set((s) => {
+      // clamp to the document (auto page-turn / citations may target a stale page number)
+      const count = s.memo?.pdfs.find((p) => p.id === pdfId)?.pageCount ?? 0
+      const np = Math.max(1, count > 0 ? Math.min(count, Math.round(page)) : Math.round(page))
+      return { currentPdfPage: { ...s.currentPdfPage, [pdfId]: np } }
+    }),
   setStudioView: (v) => set({ studioView: v }),
   refreshStudioItems: async () => {
     const st = get()
@@ -1140,7 +1352,13 @@ export const useStore = create<StoreState>((set, get) => ({
     if (item.kind === 'feynman') {
       const c = item.content as { rounds?: { status?: string }[]; currentRound?: number }
       const active = c?.rounds?.[c.currentRound ?? (c.rounds.length - 1)]?.status === 'active'
-      set({ studioView: { mode: active ? 'feynman' : 'viewer', itemId: item.id }, studioCollapsed: false, studioFullscreen: false })
+      set({ studioView: { mode: active ? 'feynman' : 'viewer', itemId: item.id }, studioCollapsed: false, liveTutorOpen: false, studioFullscreen: false })
+      return
+    }
+    // an in-progress 튜터 session resumes the live chat; a finished one opens the 오답노트 report
+    if (item.kind === 'tutor') {
+      const active = (item.content as { status?: string })?.status === 'active'
+      set({ studioView: { mode: active ? 'tutor' : 'viewer', itemId: item.id }, studioCollapsed: false, liveTutorOpen: false, studioFullscreen: false })
       return
     }
     set({
@@ -1149,7 +1367,8 @@ export const useStore = create<StoreState>((set, get) => ({
       ...(item.kind === 'mindmap' ? { studioFullscreen: true } : {})
     })
   },
-  startFeynmanReview: () => set({ studioView: { mode: 'feynman', itemId: 0 }, studioCollapsed: false, studioFullscreen: false }),
+  startFeynmanReview: () => set({ studioView: { mode: 'feynman', itemId: 0 }, studioCollapsed: false, liveTutorOpen: false, studioFullscreen: false }),
+  startTutorSession: (opts) => set({ tutorPendingOpts: opts, studioView: { mode: 'tutor', itemId: 0 }, studioCollapsed: false, liveTutorOpen: false, studioFullscreen: false }),
   jumpToTime: (t, memoIndex, memoId) => {
     const st = get()
     if (st.chatOpen) {
@@ -1222,6 +1441,8 @@ export const useStore = create<StoreState>((set, get) => ({
       studioItems: [],
       studioFullscreen: false,
       folderPreview: null,
+      folderSourcesCollapsed: false,
+      folderPreviewCollapsed: false,
       folderSrcMemoIds: [],
       folderSrcPdfIds: [],
       folderSrcNoteIds: [],
@@ -1257,8 +1478,30 @@ export const useStore = create<StoreState>((set, get) => ({
   setFolderSrcMemoIds: (ids) => set({ folderSrcMemoIds: ids }),
   setFolderSrcPdfIds: (ids) => set({ folderSrcPdfIds: ids }),
   setFolderSrcNoteIds: (ids) => set({ folderSrcNoteIds: ids }),
-  setFolderPreview: (p) => set({ folderPreview: p }),
-  toggleStudioCollapsed: () => set((s) => ({ studioCollapsed: !s.studioCollapsed })),
+  // opening a source always reveals the preview pane (it may have been collapsed)
+  setFolderPreview: (p) => set({ folderPreview: p, folderPreviewCollapsed: p ? false : get().folderPreviewCollapsed }),
+  toggleFolderSourcesCollapsed: () => set((s) => ({ folderSourcesCollapsed: !s.folderSourcesCollapsed })),
+  setFolderPreviewCollapsed: (collapsed) => set({ folderPreviewCollapsed: collapsed }),
+  // the right-hand slot is studio XOR 실시간 튜터: expanding the studio hides the tutor panel
+  toggleStudioCollapsed: () => set((s) => ({ studioCollapsed: !s.studioCollapsed, ...(s.studioCollapsed ? { liveTutorOpen: false } : {}) })),
+  setAutoPage: (patch) => set((s) => ({ autoPage: { ...s.autoPage, ...patch } })),
+  setLectureIntent: (patch) => set((s) => ({ lectureIntent: { ...s.lectureIntent, ...patch } })),
+  toggleLiveTutor: (open) =>
+    set((s) => {
+      const next = open ?? !s.liveTutorOpen
+      return next ? { liveTutorOpen: true, studioCollapsed: true, studioFullscreen: false } : { liveTutorOpen: false }
+    }),
+  setLiveTutor: (patch) => set((s) => ({ liveTutor: { ...s.liveTutor, ...patch } })),
+  pushLiveTutorCard: (card) => set((s) => ({ liveTutor: { ...s.liveTutor, cards: [...s.liveTutor.cards, card] } })),
+  updateLiveTutorCard: (id, patch) =>
+    set((s) => ({ liveTutor: { ...s.liveTutor, cards: s.liveTutor.cards.map((c) => (c.id === id ? { ...c, ...patch } : c)) } })),
+  setLiveSegmentPage: (index, pdfId, page) =>
+    set((s) => {
+      const arr = s.rec.liveSegments.slice()
+      if (!arr[index]) return {}
+      arr[index] = { ...arr[index], pdfId, pdfPage: page }
+      return { rec: { ...s.rec, liveSegments: arr } }
+    }),
   toggleStudioFullscreen: () => set((s) => ({ studioFullscreen: !s.studioFullscreen })),
   setPanelSizes: (key, sizes) =>
     set((s) => {
@@ -1272,6 +1515,7 @@ export const useStore = create<StoreState>((set, get) => ({
     set((s) => (s.audioCurrentTime === t && s.audioPlaying === playing ? s : { audioCurrentTime: t, audioPlaying: playing })),
   setAnnTool: (t) => set({ annTool: t }),
   setAnnColor: (c) => set({ annColor: c }),
+  setAnnTextSize: (v) => set({ annTextSize: v }),
   setAnnWidth: (w) => set({ annWidth: w }),
   toggleAnnRuler: () => set((s) => ({ annRuler: !s.annRuler })),
   addAnnotationLocal: (a) => {
@@ -1362,8 +1606,14 @@ export const useStore = create<StoreState>((set, get) => ({
   deleteFolder: async (id) => {
     await window.api.folders.delete(id)
     await get().refreshFolders()
-    const first = get().folders[0]
-    await get().selectFolder(first ? first.id : null)
+    if (get().selectedFolderId === id) await get().selectFolder(null)
+  },
+  setFolderArchived: async (id, archived) => {
+    await window.api.folders.setArchived(id, archived)
+    await get().refreshFolders()
+    // an archived folder leaves the sidebar — drop the selection so its notes don't linger open
+    if (archived && get().selectedFolderId === id) await get().selectFolder(null)
+    if (get().homeOpen) await get().refreshHome()
   },
 
   createMemo: async () => {
@@ -1403,10 +1653,10 @@ export const useStore = create<StoreState>((set, get) => ({
 
   setRec: (patch) => set((s) => ({ rec: { ...s.rec, ...patch } })),
   appendLiveSegment: (seg) => set((s) => ({ rec: { ...s.rec, liveSegments: [...s.rec.liveSegments, seg], partial: '' } })),
-  updateLiveSegment: (index, text) =>
+  updateLiveSegment: (index, text, translation) =>
     set((s) => {
       const arr = s.rec.liveSegments.slice()
-      if (arr[index]) arr[index] = { ...arr[index], text }
+      if (arr[index]) arr[index] = { ...arr[index], text, ...(translation !== undefined ? { translation } : {}) }
       return { rec: { ...s.rec, liveSegments: arr } }
     }),
   updateLiveSegmentTimed: (index, text, tStart, tEnd) =>

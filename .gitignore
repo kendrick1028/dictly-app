@@ -15,3 +15,8 @@ Dictly save/
 *.mp4
 *.mov
 *.pptx
+*.profraw
+appstore-screenshots/
+*.tsbuildinfo
+build/*.iconset/
+__pycache__/

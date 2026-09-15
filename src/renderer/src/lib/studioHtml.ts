@@ -7,6 +7,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import katexCss from 'katex/dist/katex.min.css?inline'
 import { MarkdownMath } from '../components/MarkdownMath'
 import { stripCiteTokens } from './citations'
+import { studioItemToMarkdown } from './studioMarkdown'
 import type {
   FeynmanContent,
   FlashcardsContent,
@@ -95,6 +96,8 @@ function itemMarkdown(item: StudioItem): { md: string; isSummary: boolean } {
         .join('\n\n---\n\n')
       return { md: `# ${title}\n\n${head}\n\n${body}`, isSummary: false }
     }
+    case 'live_tutor':
+      return { md: studioItemToMarkdown(item), isSummary: false }
     default:
       return { md: `# ${title}`, isSummary: false }
   }

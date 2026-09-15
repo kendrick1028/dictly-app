@@ -35,9 +35,17 @@ export function applyMathRules(
 
 /** Convert an array of raw segment texts into a single editable markdown body. */
 export function segmentsToMarkdown(
-  segments: { text: string }[],
+  segments: { text: string; translation?: string | null }[],
   _custom: Record<string, string> = {},
   replacements: Record<string, string> = {}
 ): string {
-  return segments.map((s) => applyReplacements(s.text.trim(), replacements)).join('\n\n')
+  return segments
+    .map((s) => {
+      const body = applyReplacements(s.text.trim(), replacements)
+      // a foreign-language chunk carries its Korean translation as an italic line right under it,
+      // so exports / copies / AI context read bilingual like the transcript view
+      const tr = (s.translation ?? '').trim()
+      return tr ? `${body}\n*${tr}*` : body
+    })
+    .join('\n\n')
 }

@@ -1,11 +1,12 @@
-import { ipcMain, clipboard, systemPreferences, desktopCapturer, shell, dialog, BrowserWindow, screen, powerSaveBlocker } from 'electron'
+import { app, ipcMain, clipboard, systemPreferences, desktopCapturer, shell, dialog, BrowserWindow, screen, powerSaveBlocker } from 'electron'
 import { writeFile, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as db from './db'
 import { ensureSidecar, getSttStatus } from './sttSidecar'
-import { claudeStatus, runClaude, runClaudeStream, runClaudeVision, hasClaudeBin } from './claudeCli'
-import { codexStatus, runCodex, runCodexVision, hasCodexBin } from './codexCli'
+import { claudeStatus, claudeAccount, runClaude, runClaudeStream, runClaudeVision, hasClaudeBin } from './claudeCli'
+import { codexStatus, codexAccount, runCodex, runCodexStream, runCodexVision, hasCodexBin } from './codexCli'
+import { agyStatus, agyAccount, runAgy, runAgyStream, hasAgyBin } from './antigravityCli'
 import {
   runAnthropic,
   runAnthropicVision,
@@ -25,12 +26,28 @@ import {
   readPdf,
   readRecording,
   revealRecording,
-  startTake
+  startTake,
+  importAudio,
+  discardImport
 } from './recordings'
+import type { ApiUsageRow, SttLanguage, TranscribeModel } from '../shared/types'
+import { usdKrw } from './fx'
+
+function parseSttModel(v: string | null | undefined): TranscribeModel {
+  return v === 'large-v3' || v === 'live' || v === 'meta' ? v : 'turbo'
+}
+function parseFollowDelay(v: string | number | null | undefined): number {
+  const n = Math.round(Number(v))
+  return Number.isFinite(n) ? Math.max(0, Math.min(4, n)) : 2
+}
+function parseSttLanguage(v: string | null | undefined): SttLanguage {
+  return v === 'en' || v === 'auto' ? v : 'ko'
+}
 import {
   buildStudioChatInstruction,
   buildStudioInstruction,
   buildFeynmanGradeInstruction,
+  buildTutorInstruction,
   buildCommandInstruction,
   buildAgentGenInstruction,
   buildScheduleInstruction,
@@ -42,17 +59,23 @@ import type { PdfDoc } from '../shared/types'
 import { reloadScheduler } from './scheduler'
 import { computeHomeData } from './home'
 import type { ExtractedScheduleItem } from '../shared/types'
-import type { Timetable, TimetableClass } from '../shared/types'
+import type { Timetable, TimetableClass, NotionTarget, NotionExportPayload } from '../shared/types'
+import { notionClear, notionExport, notionSearch, notionSetParent, notionSetToken, notionStatus } from './notion'
 import type { Agent, ChatMessage, ExportFormat, Segment, StudioItem } from '../shared/types'
 
 // CLI (Claude Code / Codex) vs direct API (Anthropic / OpenAI / Gemini)
 function connectionMode(): 'cli' | 'api' {
   return db.getSetting('connectionMode') === 'api' ? 'api' : 'cli'
 }
-// which provider powers the heavy AI tasks (정리/요약/퀴즈/채팅). gemini is API-only.
-function aiEngineSetting(): 'claude' | 'gpt' | 'gemini' {
+// which provider powers the heavy AI tasks (정리/요약/퀴즈/채팅). gemini is API-only, antigravity CLI-only.
+type Engine = 'claude' | 'gpt' | 'gemini' | 'antigravity'
+function aiEngineSetting(): Engine {
   const e = db.getSetting('aiEngine')
-  return e === 'gpt' || e === 'gemini' ? e : 'claude'
+  return e === 'gpt' || e === 'gemini' || e === 'antigravity' ? e : 'claude'
+}
+// Antigravity model as `agy models` prints it ('' = let the CLI use its own default)
+function agyModelSetting(): string {
+  return db.getSetting('aiAgyModel') || ''
 }
 // GPT-5.6 Codex model ids + reasoning-effort values (keep in sync with renderer GPT_MODELS/REASONING).
 // Legacy stored values (old gpt-5*/default model, `minimal` effort) are migrated to valid ones so
@@ -93,8 +116,15 @@ function withAbort<T>(id: string | undefined, fn: (signal?: AbortSignal) => Prom
 
 // ─── provider fallback: when the active engine hits a usage/rate limit, automatically retry the
 // same task on the next available provider (Claude / GPT / Gemini, CLI or API). ────────────────
-type ProvKey = 'claude-cli' | 'gpt-cli' | 'claude-api' | 'gpt-api' | 'gemini-api'
-const PROV_LABEL: Record<ProvKey, string> = { 'claude-cli': 'Claude', 'gpt-cli': 'GPT', 'claude-api': 'Claude', 'gpt-api': 'GPT', 'gemini-api': 'Gemini' }
+type ProvKey = 'claude-cli' | 'gpt-cli' | 'agy-cli' | 'claude-api' | 'gpt-api' | 'gemini-api'
+const PROV_LABEL: Record<ProvKey, string> = {
+  'claude-cli': 'Claude',
+  'gpt-cli': 'GPT',
+  'agy-cli': 'Antigravity',
+  'claude-api': 'Claude',
+  'gpt-api': 'GPT',
+  'gemini-api': 'Gemini'
+}
 
 /** does this error look like a usage/quota/rate limit (→ worth falling back), vs a real failure? */
 function isQuotaError(e: unknown): boolean {
@@ -111,6 +141,8 @@ function providerAvailable(k: ProvKey): boolean {
       return hasClaudeBin()
     case 'gpt-cli':
       return hasCodexBin()
+    case 'agy-cli':
+      return hasAgyBin()
     case 'claude-api':
       return !!apiKeyFor('claude')
     case 'gpt-api':
@@ -121,33 +153,66 @@ function providerAvailable(k: ProvKey): boolean {
 }
 function primaryProvider(): ProvKey {
   const eng = aiEngineSetting()
-  if (connectionMode() === 'api') return eng === 'gpt' ? 'gpt-api' : eng === 'gemini' ? 'gemini-api' : 'claude-api'
-  return eng === 'gpt' ? 'gpt-cli' : 'claude-cli' // gemini has no CLI → Claude
+  if (connectionMode() === 'api') return eng === 'gpt' ? 'gpt-api' : eng === 'gemini' ? 'gemini-api' : 'claude-api' // antigravity has no API → Claude
+  return eng === 'gpt' ? 'gpt-cli' : eng === 'antigravity' ? 'agy-cli' : 'claude-cli' // gemini has no CLI → Claude
 }
 /** primary first, then the rest of the AVAILABLE providers in a fixed preference order */
 function providerChain(): ProvKey[] {
   const primary = primaryProvider()
-  const pref: ProvKey[] = ['claude-cli', 'gpt-cli', 'claude-api', 'gpt-api', 'gemini-api']
+  const pref: ProvKey[] = ['claude-cli', 'gpt-cli', 'agy-cli', 'claude-api', 'gpt-api', 'gemini-api']
   return [primary, ...pref.filter((k) => k !== primary)].filter(providerAvailable)
 }
+// ─── sticky fallback: once the primary hits a usage limit we KEEP using the provider we fell back
+// to — no re-probing the exhausted primary on every chunk (live correction fires per chunk, which
+// used to spam "한도 초과" toasts). Cleared when the user changes engine/mode, presses "다시 시도" in
+// the 연결 modal, or after the cooldown (≈ the usage window) passes. ─────────────────────────────
+const FALLBACK_TTL_MS = 5 * 60 * 60 * 1000
+let stickyFallback: { from: ProvKey; to: ProvKey; since: number } | null = null
+function activeFallback(): { from: ProvKey; to: ProvKey; since: number } | null {
+  if (!stickyFallback) return null
+  if (Date.now() - stickyFallback.since > FALLBACK_TTL_MS || stickyFallback.from !== primaryProvider() || !providerAvailable(stickyFallback.to)) {
+    stickyFallback = null
+  }
+  return stickyFallback
+}
+export function fallbackStatus(): { from: string; to: string; since: number } | null {
+  const f = activeFallback()
+  return f ? { from: PROV_LABEL[f.from], to: PROV_LABEL[f.to], since: f.since } : null
+}
+export function clearFallback(): void {
+  stickyFallback = null
+}
+let lastNotified: { key: string; at: number } | null = null
 function notifyFallback(from: ProvKey, to: ProvKey): void {
   if (PROV_LABEL[from] === PROV_LABEL[to]) return
+  // several in-flight tasks can trip the limit at once — one toast per switch, not one per task
+  const key = `${from}>${to}`
+  if (lastNotified && lastNotified.key === key && Date.now() - lastNotified.at < 60_000) return
+  lastNotified = { key, at: Date.now() }
   for (const w of BrowserWindow.getAllWindows()) if (!w.webContents.isDestroyed()) w.webContents.send('ai:fallback', { from: PROV_LABEL[from], to: PROV_LABEL[to] })
 }
 /** run `attempt` against the provider chain: primary surfaces non-quota errors immediately; a
- *  quota error advances to the next available provider (a broken fallback is skipped, not fatal). */
+ *  quota error advances to the next available provider (a broken fallback is skipped, not fatal).
+ *  With a sticky fallback active the chain starts at that provider instead of the primary. */
 async function withFallback<T>(attempt: (k: ProvKey) => Promise<T>): Promise<T> {
-  const chain = providerChain()
-  if (chain.length === 0) return attempt(primaryProvider()) // let it throw its own clear error
+  const primary = primaryProvider()
+  const sticky = activeFallback()
+  let chain = providerChain()
+  if (sticky) chain = [sticky.to, ...chain.filter((k) => k !== sticky.to)]
+  if (chain.length === 0) return attempt(primary) // let it throw its own clear error
   let lastErr: unknown
   for (let i = 0; i < chain.length; i++) {
     try {
       const r = await attempt(chain[i])
-      if (i > 0) notifyFallback(chain[0], chain[i])
+      if (i > 0) {
+        // fell back on THIS call → pin the working provider so the next calls go straight to it
+        stickyFallback = { from: primary, to: chain[i], since: Date.now() }
+        notifyFallback(chain[0], chain[i])
+      }
       return r
     } catch (e) {
       lastErr = e
-      if (i === 0 && !isQuotaError(e)) throw e // primary's genuine failure → surface it
+      if (i === 0 && !sticky && !isQuotaError(e)) throw e // primary's genuine failure → surface it
     }
   }
   throw lastErr
@@ -159,6 +224,8 @@ function runText(k: ProvKey, opts: Parameters<typeof runClaude>[0]): Promise<str
       return runClaude({ ...opts, effort: claudeEffort() })
     case 'gpt-cli':
       return runCodex({ ...opts, model: gptModelSetting() }, gptReasoning())
+    case 'agy-cli':
+      return runAgy({ ...opts, model: agyModelSetting() || undefined })
     case 'claude-api':
       return runAnthropic(apiKeyFor('claude'), { ...opts, model: apiModelFor('claude') })
     case 'gpt-api':
@@ -172,10 +239,9 @@ function runTextStream(k: ProvKey, opts: Parameters<typeof runClaudeStream>[0], 
     case 'claude-cli':
       return runClaudeStream({ ...opts, effort: claudeEffort() }, onDelta)
     case 'gpt-cli':
-      return runCodex({ ...opts, model: gptModelSetting() }, gptReasoning()).then((t) => {
-        onDelta(t)
-        return t
-      })
+      return runCodexStream({ ...opts, model: gptModelSetting() }, gptReasoning(), onDelta)
+    case 'agy-cli':
+      return runAgyStream({ ...opts, model: agyModelSetting() || undefined }, onDelta)
     case 'claude-api':
       return runAnthropic(apiKeyFor('claude'), { ...opts, model: apiModelFor('claude') }, onDelta)
     case 'gpt-api':
@@ -190,6 +256,13 @@ function runVision(k: ProvKey, imagePaths: string[], instruction: string, system
       return runClaudeVision(imagePaths, instruction, systemPrompt)
     case 'gpt-cli':
       return runCodexVision(imagePaths, instruction, systemPrompt, gptReasoning())
+    case 'agy-cli': {
+      // agy headless mode can't attach images (and reading files would need blanket tool approval)
+      // → hand image analysis to the next connected provider that can
+      const alt = (['claude-cli', 'gpt-cli', 'claude-api', 'gpt-api', 'gemini-api'] as ProvKey[]).find(providerAvailable)
+      if (!alt) return Promise.reject(new Error('Antigravity CLI는 이미지 분석을 지원하지 않아요. Claude Code·Codex 또는 API 키를 연결하면 그쪽으로 처리해요.'))
+      return runVision(alt, imagePaths, instruction, systemPrompt)
+    }
     case 'claude-api':
       return runAnthropicVision(apiKeyFor('claude'), imagePaths, instruction, systemPrompt)
     case 'gpt-api':
@@ -216,6 +289,7 @@ let savedBounds: Electron.Rectangle | null = null
 export function registerIpc(): void {
   // ---- App ----
   ipcMain.handle('app:dataDir', () => db.dataDir())
+  ipcMain.handle('app:version', () => app.getVersion())
 
   // ---- Window (floating widget / compact mode) ----
   ipcMain.handle('window:setCompact', (e, on: boolean) => {
@@ -293,6 +367,7 @@ export function registerIpc(): void {
   ipcMain.handle('folders:create', (_e, name: string, parentId: number | null) => db.createFolder(name, parentId))
   ipcMain.handle('folders:rename', (_e, id: number, name: string) => db.renameFolder(id, name))
   ipcMain.handle('folders:setFavorite', (_e, id: number, fav: boolean) => db.setFolderFavorite(id, fav))
+  ipcMain.handle('folders:setArchived', (_e, id: number, archived: boolean) => db.setFolderArchived(id, archived))
   ipcMain.handle('memos:setFavorite', (_e, id: number, fav: boolean) => db.setMemoFavorite(id, fav))
   ipcMain.handle('folders:delete', (_e, id: number) => {
     const paths = db.collectPdfPathsForFolder(id)
@@ -405,6 +480,9 @@ export function registerIpc(): void {
   // PDF page-text cache (studio citations)
   ipcMain.handle('pdfs:getExtractedPages', (_e, id: number) => db.getPdfExtractedPages(id))
   ipcMain.handle('pdfs:setExtractedPages', (_e, id: number, pages: string[]) => db.setPdfExtractedPages(id, JSON.stringify(pages)))
+  // per-page sentence embeddings (교안 auto page-turn) — computed by the STT sidecar, cached here
+  ipcMain.handle('pdfs:getPageEmbeddings', (_e, id: number) => db.getPdfPageEmbeddings(id))
+  ipcMain.handle('pdfs:setPageEmbeddings', (_e, id: number, data: db.PdfPageEmbeddings | null) => db.setPdfPageEmbeddings(id, data))
   // image/scanned PDF → vision transcribes page text (manual indexing; <<<PAGE n>>> delimited)
   ipcMain.handle('pdfs:ocrPages', async (_e, images: Uint8Array[], startPage: number, systemPrompt: string) => {
     const paths: string[] = []
@@ -456,6 +534,37 @@ export function registerIpc(): void {
       const instruction = command ? buildCommandInstruction(command, hasPdfs, multiMemo) : buildStudioChatInstruction(hasPdfs, multiMemo)
       return withAbort(id, (signal) =>
         runAIStream({ instruction, content, systemPrompt, model, timeoutMs: 300000, signal }, (full) => {
+          if (!event.sender.isDestroyed()) event.sender.send(channel, { type: 'delta', text: full })
+        })
+      )
+    }
+  )
+  // AI 튜터: one conversational tutoring turn (streams markdown + trailing [[STATE:{...}]])
+  ipcMain.handle(
+    'studio:tutorStream',
+    (
+      event,
+      id: string,
+      manifest: string,
+      history: { role: 'user' | 'assistant'; content: string }[],
+      userMessage: string,
+      stateJson: string,
+      mode: 'learn' | 'sprint',
+      subject: string,
+      hasPdfs: boolean,
+      multiMemo: boolean,
+      systemPrompt: string,
+      model?: string
+    ) => {
+      const convo = history.map((m) => `${m.role === 'user' ? '학습자' : '선생님'}: ${m.content}`).join('\n')
+      const content =
+        `# 학습 자료\n${manifest}\n\n` +
+        (stateJson ? `# 현재 상태(STATE)\n${stateJson}\n\n` : '') +
+        (convo ? `# 지금까지의 수업 대화\n${convo}\n\n` : '') +
+        `# 학습자의 새 메시지\n${userMessage}`
+      const channel = `claude:stream:${id}`
+      return withAbort(id, (signal) =>
+        runAIStream({ instruction: buildTutorInstruction({ mode, subject, hasPdfs, multiMemo }), content, systemPrompt, model, timeoutMs: 300000, signal }, (full) => {
           if (!event.sender.isDestroyed()) event.sender.send(channel, { type: 'delta', text: full })
         })
       )
@@ -637,15 +746,18 @@ export function registerIpc(): void {
   // ---- Claude ----
   ipcMain.handle('claude:status', () => claudeStatus())
   ipcMain.handle('ai:status', async () => {
-    const [claude, gpt] = await Promise.all([claudeStatus(), codexStatus()])
+    const [claude, gpt, agy, claudeAcct] = await Promise.all([claudeStatus(), codexStatus(), agyStatus(), claudeAccount().catch(() => null)])
     return {
-      claude: { installed: claude.installed, loggedIn: claude.installed, version: claude.version },
-      gpt,
+      claude: { installed: claude.installed, loggedIn: claude.installed, version: claude.version, account: claudeAcct },
+      gpt: { ...gpt, account: gpt.loggedIn ? codexAccount() : null },
+      antigravity: { installed: agy.installed, loggedIn: agy.loggedIn, version: agy.version, account: agy.loggedIn ? agyAccount() : null },
       connectionMode: connectionMode(),
       engine: aiEngineSetting(),
       gptModel: gptModelSetting(),
       gptReasoning: gptReasoning(),
       claudeEffort: claudeEffort(),
+      agyModel: agyModelSetting(),
+      agyModels: agy.models,
       // API-mode keys (values never sent to renderer — only whether they're set)
       anthropicKeySet: !!db.getSetting('anthropicKey'),
       openaiKeySet: !!db.getSetting('openaiKey'),
@@ -655,9 +767,13 @@ export function registerIpc(): void {
       geminiApiModel: db.getSetting('geminiApiModel') || '',
       transcribeEngine: db.getSetting('transcribeEngine') || 'local',
       transcribeModel: db.getSetting('transcribeModel') || 'gpt-4o-transcribe',
-      // local Whisper model (turbo = fast default, large-v3 = most accurate/slower)
-      sttModel: db.getSetting('sttModel') === 'large-v3' ? 'large-v3' : 'turbo',
-      realtimePreview: db.getSetting('realtimePreview') === 'on'
+      // local Whisper model (turbo = fast default, large-v3 = most accurate/slower, live = streaming)
+      sttModel: parseSttModel(db.getSetting('sttModel')),
+      sttLanguage: parseSttLanguage(db.getSetting('sttLanguage')),
+      metaKeySet: !!db.getSetting('metaKey'),
+      correctFollowDelay: parseFollowDelay(db.getSetting('correctFollowDelay') ?? 2),
+      realtimePreview: db.getSetting('realtimePreview') === 'on',
+      fallback: fallbackStatus()
     }
   })
   // abort an in-flight AI generation (chat / studio / feynman) by its run id
@@ -665,10 +781,17 @@ export function registerIpc(): void {
     aiRuns.get(id)?.abort()
     aiRuns.delete(id)
   })
-  ipcMain.handle('ai:setConnectionMode', (_e, mode: string) => db.setSetting('connectionMode', mode === 'api' ? 'api' : 'cli'))
-  ipcMain.handle('ai:setEngine', (_e, engine: string) =>
-    db.setSetting('aiEngine', engine === 'gpt' || engine === 'gemini' ? engine : 'claude')
-  )
+  ipcMain.handle('ai:setConnectionMode', (_e, mode: string) => {
+    db.setSetting('connectionMode', mode === 'api' ? 'api' : 'cli')
+    clearFallback() // the primary changed — start fresh
+  })
+  ipcMain.handle('ai:setEngine', (_e, engine: string) => {
+    db.setSetting('aiEngine', engine === 'gpt' || engine === 'gemini' || engine === 'antigravity' ? engine : 'claude')
+    clearFallback()
+  })
+  ipcMain.handle('ai:setAgyModel', (_e, model: string) => db.setSetting('aiAgyModel', model || ''))
+  // "다시 시도": drop the sticky fallback so the next task probes the primary provider again
+  ipcMain.handle('ai:clearFallback', () => clearFallback())
   ipcMain.handle('ai:setAnthropicKey', (_e, key: string) => db.setSetting('anthropicKey', key || ''))
   ipcMain.handle('ai:setGeminiKey', (_e, key: string) => db.setSetting('geminiKey', key || ''))
   ipcMain.handle('ai:setApiModel', (_e, provider: string, model: string) => {
@@ -678,8 +801,14 @@ export function registerIpc(): void {
   ipcMain.handle('ai:setGptModel', (_e, model: string) => db.setSetting('aiGptModel', GPT_MODEL_IDS.includes(model) ? model : DEFAULT_GPT_MODEL))
   ipcMain.handle('ai:setGptReasoning', (_e, effort: string) => db.setSetting('aiGptReasoning', effort || 'low'))
   ipcMain.handle('ai:setClaudeEffort', (_e, effort: string) => db.setSetting('claudeEffort', effort || 'low'))
-  // local Whisper model choice (turbo | large-v3)
-  ipcMain.handle('ai:setSttModel', (_e, model: string) => db.setSetting('sttModel', model === 'large-v3' ? 'large-v3' : 'turbo'))
+  // local Whisper model choice (turbo | large-v3 | live)
+  ipcMain.handle('ai:setSttModel', (_e, model: string) => db.setSetting('sttModel', parseSttModel(model)))
+  // transcription language (ko | en | auto)
+  ipcMain.handle('ai:setSttLanguage', (_e, lang: string) => db.setSetting('sttLanguage', parseSttLanguage(lang)))
+  // Meta Model API key — used only by the Meta (Muse Voice Transcribe) transcription engine
+  ipcMain.handle('ai:setMetaKey', (_e, key: string) => db.setSetting('metaKey', (key || '').trim()))
+  // how many following chunks live correction waits for (0 = immediate; lower = faster translation)
+  ipcMain.handle('ai:setCorrectFollowDelay', (_e, n: number) => db.setSetting('correctFollowDelay', String(parseFollowDelay(n))))
   // OpenAI cloud transcription engine settings
   ipcMain.handle('ai:setTranscribeEngine', (_e, engine: string) =>
     db.setSetting('transcribeEngine', ['openai-transcribe', 'openai-realtime'].includes(engine) ? engine : 'local')
@@ -691,7 +820,8 @@ export function registerIpc(): void {
     engine: db.getSetting('transcribeEngine') || 'local',
     apiKey: db.getSetting('openaiKey') || '',
     oaiModel: db.getSetting('transcribeModel') || 'gpt-4o-transcribe',
-    realtimePreview: db.getSetting('realtimePreview') === 'on'
+    realtimePreview: db.getSetting('realtimePreview') === 'on',
+    metaKey: db.getSetting('metaKey') || ''
   }))
 
   ipcMain.handle('claude:summarize', (_e, transcript: string, systemPrompt: string) =>
@@ -743,7 +873,7 @@ export function registerIpc(): void {
   ipcMain.handle(
     'claude:correctChunk',
     // routes through the active engine: Claude (fast) or GPT/Codex (slow but selectable)
-    (_e, context: string, followContext: string, chunk: string, systemPrompt: string, model?: string) =>
+    (_e, context: string, followContext: string, chunk: string, systemPrompt: string, model?: string, translate?: string) =>
       runAI({
         instruction:
           '아래 [앞 맥락]은 이미 전사된 앞부분, [뒤 맥락]은 바로 뒤에 이어지는 부분입니다(둘 다 참고용 — 절대 수정/출력하지 말 것). [현재 청크]는 교정할 부분입니다. ' +
@@ -753,7 +883,10 @@ export function registerIpc(): void {
           '(5) 말로 읽은 수식 → $...$ KaTeX(아래첨자 _, 위첨자 ^, "A 나누기 B"·"B분의 A"는 \\frac{A}{B}). ' +
           '유지 규칙: 구어체 어미·말투·조사·반복은 그대로 두고(문어체로 다듬지 말 것), 이미 올바른 표기·수식은 건드리지 말고, 확실하지 않으면 원문 그대로 두세요(실제 음성을 들을 수 없으므로 추측 금지). ' +
           '★절대 규칙: 청크 경계를 바꾸지 마세요 — 단어를 다른 청크로 옮기거나, 문장을 합치거나 나누거나, 순서를 바꾸지 마세요. 요약·재구성·내용 추가/삭제 금지. ' +
-          '고칠 것이 없으면 [현재 청크]를 글자 그대로 출력하세요. 교정된 [현재 청크] 텍스트만 한 줄로 출력하세요(JSON·코드펜스·따옴표·설명 없이).',
+          (translate
+            ? '고칠 것이 없으면 [현재 청크]를 글자 그대로 씁니다. 청크는 외국어 강의입니다 — 교정문은 원문 언어 그대로 두고(번역 금지), 그와 별도로 교정된 청크의 자연스러운 한국어 번역을 함께 주세요(강의체·전문 용어는 통용 표기, 앞뒤 맥락을 참고하되 청크에 있는 내용만). ' +
+              '순수 JSON 한 줄만 출력: {"text":"교정된 청크(원문 언어)","ko":"한국어 번역"} (코드펜스·설명 없이).'
+            : '고칠 것이 없으면 [현재 청크]를 글자 그대로 출력하세요. 교정된 [현재 청크] 텍스트만 한 줄로 출력하세요(JSON·코드펜스·따옴표·설명 없이).'),
         content: `[앞 맥락]\n${context || '(없음)'}\n\n[뒤 맥락]\n${followContext || '(없음)'}\n\n[현재 청크]\n${chunk}`,
         systemPrompt,
         model,
@@ -922,11 +1055,21 @@ export function registerIpc(): void {
   ipcMain.handle('recordings:export', (_e, path: string) => exportRecording(path))
   ipcMain.handle('recordings:exportMp4', (_e, path: string, title?: string) => exportRecordingMp4(path, title))
   ipcMain.handle('recordings:reveal', (_e, path: string) => revealRecording(path))
+  // pick an existing audio file and convert it into a take (48k PCM) + a 16k WAV for transcription
+  ipcMain.handle('recordings:importAudio', (_e, memoId: number) => importAudio(memoId))
+  ipcMain.handle('recordings:discardImport', (_e, paths: string[]) => discardImport(paths))
 
   // ---- Export & clipboard ----
   ipcMain.handle('export:memo', (_e, payload: { title: string; format: ExportFormat; data: string }) =>
     exportMemo(payload)
   )
+  // ---- Notion (설정 → Notion 연결 · 스튜디오 ⋮ → Notion으로 내보내기) ----
+  ipcMain.handle('notion:status', () => notionStatus())
+  ipcMain.handle('notion:setToken', (_e, token: string) => notionSetToken(token))
+  ipcMain.handle('notion:clear', () => notionClear())
+  ipcMain.handle('notion:search', (_e, query: string) => notionSearch(query))
+  ipcMain.handle('notion:setParent', (_e, target: NotionTarget | null) => notionSetParent(target))
+  ipcMain.handle('notion:export', (_e, payload: NotionExportPayload) => notionExport(payload))
   ipcMain.handle('clipboard:writeText', (_e, text: string) => clipboard.writeText(text))
   ipcMain.handle('clipboard:writeHtml', (_e, html: string, text: string) => clipboard.write({ html, text }))
 
@@ -947,6 +1090,23 @@ export function registerIpc(): void {
     return db.recordingsDir()
   })
   ipcMain.handle('settings:openRecordingsDir', () => shell.openPath(db.recordingsDir()))
+  // USD→KRW rate for the live Meta transcription cost display (cached 12h, offline fallback)
+  ipcMain.handle('fx:usdKrw', () => usdKrw())
+  // cloud API usage log (transcription engines) → dashboard monthly cost chart
+  ipcMain.handle('usage:add', (_e, row: Omit<ApiUsageRow, 'id'>) =>
+    db.addApiUsage({
+      ts: Number(row.ts) || Date.now(),
+      provider: String(row.provider || 'unknown').slice(0, 32),
+      kind: String(row.kind || 'live').slice(0, 32),
+      audioSec: Math.max(0, Number(row.audioSec) || 0),
+      usd: Math.max(0, Number(row.usd) || 0),
+      estimate: !!row.estimate,
+      memoId: row.memoId ?? null
+    })
+  )
+  // small namespaced preferences (e.g. last audio source)
+  ipcMain.handle('prefs:get', (_e, key: string) => db.getPref(String(key).slice(0, 64)))
+  ipcMain.handle('prefs:set', (_e, key: string, value: string) => db.setPref(String(key).slice(0, 64), String(value ?? '')))
   ipcMain.handle('settings:getVad', () => ({
     silenceSec: Number(db.getSetting('vadSilenceSec') ?? 1.0),
     maxSec: Number(db.getSetting('vadMaxSec') ?? 22)

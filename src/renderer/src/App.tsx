@@ -17,6 +17,7 @@ import { ScheduleConfirmModal } from './components/studio/ScheduleConfirmModal'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { PromptDialog } from './components/PromptDialog'
 import { Toast } from './components/Toast'
+import { WhatsNewModal } from './components/WhatsNewModal'
 import { CompactWidget } from './components/CompactWidget'
 import { Spotlight } from './components/Spotlight'
 import { matchShortcut } from './lib/shortcut'
@@ -30,10 +31,21 @@ export default function App(): JSX.Element {
   const notesOpen = useStore((s) => s.notesOpen)
   const chatOpen = useStore((s) => s.chatOpen)
   const aiReady = useStore((s) => s.aiReady)
+  const aiFallback = useStore((s) => s.aiFallback)
+  // "who am I connected as" for the plug tooltip (CLI account email / API provider)
+  const connectTip = useStore((s) => {
+    if (s.connectionMode === 'cli') {
+      const acct = s.aiEngine === 'gpt' ? s.gpt?.account : s.aiEngine === 'antigravity' ? s.antigravity?.account : s.claude?.account
+      const label = s.aiEngine === 'gpt' ? 'GPT (Codex)' : s.aiEngine === 'antigravity' ? 'Antigravity (agy)' : 'Claude (Claude Code)'
+      return acct?.email ? `${label} · ${acct.email}` : label
+    }
+    return s.aiEngine === 'gpt' ? 'OpenAI API' : s.aiEngine === 'gemini' ? 'Gemini API' : 'Claude API'
+  })
   const compactMode = useStore((s) => s.compactMode)
   const sidebarCollapsed = useStore((s) => s.sidebarCollapsed)
   const setSidebarCollapsed = useStore((s) => s.setSidebarCollapsed)
   const enterCompact = useStore((s) => s.enterCompact)
+  const refreshAiStatus = useStore((s) => s.refreshAiStatus)
   const setConnectOpen = useStore((s) => s.setConnectOpen)
   const setSettingsOpen = useStore((s) => s.setSettingsOpen)
   const setAgentManagerOpen = useStore((s) => s.setAgentManagerOpen)
@@ -42,6 +54,31 @@ export default function App(): JSX.Element {
   useEffect(() => {
     init()
   }, [init])
+
+  // scrollbars show only while scrolling: stamp the scrolling element, clear shortly after
+  useEffect(() => {
+    const timers = new WeakMap<Element, number>()
+    const onScroll = (e: Event): void => {
+      const el = e.target
+      if (!(el instanceof Element)) return
+      el.setAttribute('data-scrolling', '')
+      const prev = timers.get(el)
+      if (prev) window.clearTimeout(prev)
+      timers.set(el, window.setTimeout(() => el.removeAttribute('data-scrolling'), 900))
+    }
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true })
+    return () => document.removeEventListener('scroll', onScroll, { capture: true })
+  }, [])
+
+  // npm CLI updates happen outside Dictly. When the user returns from Terminal, refresh the
+  // provider status so a momentary update-time failure never remains latched in the UI.
+  useEffect(() => {
+    const refresh = (): void => {
+      void refreshAiStatus().catch(() => {})
+    }
+    window.addEventListener('focus', refresh)
+    return () => window.removeEventListener('focus', refresh)
+  }, [refreshAiStatus])
 
   // global shortcut → open/close Spotlight search (configurable in Settings, default ⌘⇧F)
   useEffect(() => {
@@ -83,14 +120,14 @@ export default function App(): JSX.Element {
       {/* right side: a white rounded card floating on the gray window, below the titlebar */}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         {/* titlebar: drag strip with settings/agent/connect aligned at traffic-light height */}
-        <div className="drag flex h-11 shrink-0 items-center justify-end gap-1 pr-3">
+        <div className={`drag flex h-11 shrink-0 items-center justify-end gap-1 ${window.api.app.platform === 'win32' ? 'pr-[150px]' : 'pr-3'}`}>
           <button
             onClick={() => setConnectOpen(true)}
             className="no-drag relative rounded-lg p-1.5 text-subtle hover:bg-black/5"
-            title="AI 연결 (Claude / GPT)"
+            title={aiReady ? `AI 연결됨 · ${connectTip}${aiFallback ? ` (한도 초과 → ${aiFallback.to} 사용 중)` : ''}` : 'AI 연결 (Claude / GPT)'}
           >
             <Plug size={16} />
-            <span className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${aiReady ? 'bg-emerald-500' : 'bg-gray-300'}`} />
+            <span className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${aiFallback ? 'bg-amber-400' : aiReady ? 'bg-emerald-500' : 'bg-gray-300'}`} />
           </button>
           <button onClick={() => setAgentManagerOpen(true)} className="no-drag rounded-lg p-1.5 text-subtle hover:bg-black/5" title="에이전트 / 키워드">
             <Users size={16} />
@@ -149,6 +186,7 @@ export default function App(): JSX.Element {
       <PromptDialog />
       <Spotlight />
       <Toast />
+      <WhatsNewModal />
     </div>
   )
 }

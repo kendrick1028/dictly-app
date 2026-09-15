@@ -1,8 +1,8 @@
-import { spawn } from 'child_process'
-import { existsSync } from 'fs'
+import { spawnCli } from './cliBin'
+import { existsSync, readFileSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
-import type { ClaudeStatus } from '../shared/types'
+import { join, delimiter } from 'path'
+import type { ClaudeStatus, CliAccount } from '../shared/types'
 
 let cachedBin: string | null | undefined
 
@@ -18,8 +18,13 @@ function resolveClaudeBin(): string | null {
     join(home, '.local', 'bin', 'claude')
   ]
   // also scan PATH entries
-  for (const dir of (process.env.PATH || '').split(':')) {
-    if (dir) candidates.push(join(dir, 'claude'))
+  // Windows: the native installer drops claude.exe into ~/.local/bin; npm installs a claude.cmd shim in %APPDATA%\npm
+  if (process.platform === 'win32') {
+    candidates.push(join(home, '.local', 'bin', 'claude.exe'))
+    if (process.env.APPDATA) candidates.push(join(process.env.APPDATA, 'npm', 'claude.cmd'))
+  }
+  for (const dir of (process.env.PATH || '').split(delimiter)) {
+    if (dir) candidates.push(join(dir, 'claude'), join(dir, 'claude.cmd'))
   }
   cachedBin = candidates.find((c) => existsSync(c)) ?? null
   return cachedBin
@@ -40,7 +45,7 @@ function spawnEnv(): NodeJS.ProcessEnv {
   ]
   return {
     ...process.env,
-    PATH: [...extra, process.env.PATH || ''].join(':')
+    PATH: [...extra, process.env.PATH || ''].join(delimiter)
   }
 }
 
@@ -48,7 +53,7 @@ export async function claudeStatus(): Promise<ClaudeStatus> {
   const bin = resolveClaudeBin()
   if (!bin) return { installed: false, version: null }
   return new Promise((resolve) => {
-    const p = spawn(bin, ['--version'], { env: spawnEnv() })
+    const p = spawnCli(bin, ['--version'], { env: spawnEnv() })
     let out = ''
     p.stdout.on('data', (d) => (out += d.toString()))
     p.on('error', () => resolve({ installed: false, version: null }))
@@ -56,10 +61,72 @@ export async function claudeStatus(): Promise<ClaudeStatus> {
   })
 }
 
+/** Signed-in Claude Code account. Primary: `claude auth status` (JSON: email/orgName/subscriptionType);
+ *  fallback: the oauthAccount block the CLI caches in ~/.claude.json. Never surfaces tokens. */
+export async function claudeAccount(): Promise<CliAccount | null> {
+  const bin = resolveClaudeBin()
+  if (!bin) return null
+  const fromCli = await new Promise<CliAccount | null>((resolve) => {
+    let out = ''
+    let done = false
+    const finish = (v: CliAccount | null): void => {
+      if (done) return
+      done = true
+      resolve(v)
+    }
+    let p: ReturnType<typeof spawnCli>
+    try {
+      p = spawnCli(bin, ['auth', 'status'], { env: spawnEnv() })
+    } catch {
+      return finish(null)
+    }
+    const timer = setTimeout(() => {
+      p.kill()
+      finish(null)
+    }, 5000)
+    p.stdout?.on('data', (d) => (out += d.toString()))
+    p.on('error', () => {
+      clearTimeout(timer)
+      finish(null)
+    })
+    p.on('exit', () => {
+      clearTimeout(timer)
+      try {
+        const j = JSON.parse(out.trim().replace(/^[^{]*/, '')) as Record<string, unknown>
+        if (!j.loggedIn) return finish({ email: null, name: null, plan: null, org: null, method: null })
+        finish({
+          email: typeof j.email === 'string' ? j.email : null,
+          name: null,
+          plan: typeof j.subscriptionType === 'string' ? j.subscriptionType : null,
+          org: typeof j.orgName === 'string' ? j.orgName : null,
+          method: typeof j.authMethod === 'string' ? j.authMethod : null
+        })
+      } catch {
+        finish(null)
+      }
+    })
+  })
+  const cached = readCachedClaudeAccount()
+  if (fromCli && (fromCli.email || fromCli.plan)) return { ...fromCli, name: cached?.name ?? null, org: fromCli.org ?? cached?.org ?? null }
+  return cached ?? fromCli
+}
+
+function readCachedClaudeAccount(): CliAccount | null {
+  try {
+    const raw = JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf-8')) as { oauthAccount?: Record<string, unknown> }
+    const a = raw.oauthAccount
+    if (!a) return null
+    const str = (k: string): string | null => (typeof a[k] === 'string' && (a[k] as string).trim() ? (a[k] as string) : null)
+    return { email: str('emailAddress'), name: str('displayName') ?? str('fullName'), plan: str('subscriptionType'), org: str('organizationName'), method: 'claude.ai' }
+  } catch {
+    return null
+  }
+}
+
 /** kill the spawned process + reject when an abort signal fires (shared by run/runStream) */
 export function wireAbort(
   signal: AbortSignal | undefined,
-  p: ReturnType<typeof spawn>,
+  p: ReturnType<typeof spawnCli>,
   timer: ReturnType<typeof setTimeout>,
   reject: (e: Error) => void
 ): void {
@@ -112,7 +179,7 @@ export function runClaude(opts: RunClaudeOptions): Promise<string> {
     if (opts.effort) {
       args.push('--effort', opts.effort)
     }
-    const p = spawn(bin, args, { env: spawnEnv() })
+    const p = spawnCli(bin, args, { env: spawnEnv() })
     let out = ''
     let err = ''
     const timer = setTimeout(() => {
@@ -157,7 +224,7 @@ export function runClaudeVision(
     const prompt = `${instruction}\n\n분석할 이미지 파일(절대경로) — Read 도구로 모두 열어보세요:\n${imagePaths.join('\n')}`
     const args = ['-p', prompt, '--output-format', 'text', '--allowedTools', 'Read']
     if (systemPrompt) args.push('--append-system-prompt', systemPrompt)
-    const p = spawn(bin, args, { env: spawnEnv() })
+    const p = spawnCli(bin, args, { env: spawnEnv() })
     let out = ''
     let err = ''
     const timer = setTimeout(() => {
@@ -192,7 +259,7 @@ export function runClaudeStream(opts: RunClaudeOptions, onDelta: (full: string) 
     if (opts.model && opts.model !== 'default') args.push('--model', opts.model)
     if (opts.effort) args.push('--effort', opts.effort)
 
-    const p = spawn(bin, args, { env: spawnEnv() })
+    const p = spawnCli(bin, args, { env: spawnEnv() })
     let buf = ''
     let full = ''
     let result: string | null = null

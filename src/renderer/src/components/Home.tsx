@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { GraduationCap, Clock, Flag, CalendarDays, ListChecks, Timer, Activity, NotebookPen, Plus, Trash2, Check, Star, Folder, FileText } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { GraduationCap, Clock, Flag, CalendarDays, ListChecks, Timer, Activity, NotebookPen, Plus, Trash2, Check, Star, Folder, FileText, Coins } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import type { HomeData, HomeFavorite, HomeFolderStat, ScheduleEvent } from '../../../shared/types'
 
@@ -49,16 +49,16 @@ const todayLocal = (): string => {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
-// section header: icon + title + muted suffix + optional action (right)
+// section header: icon + title + muted suffix + optional action (right).
+// title/suffix can shrink+truncate so a narrow column never pushes the action (e.g. a dropdown)
+// off-screen; the icon and action stay fixed.
 function Head({ icon, title, suffix, action }: { icon: JSX.Element; title: string; suffix?: string; action?: JSX.Element }): JSX.Element {
   return (
-    <div className="mb-3.5 flex shrink-0 items-center gap-2">
-      <span style={{ color: INK }}>{icon}</span>
-      <span className="text-[15px] font-semibold" style={{ whiteSpace: 'nowrap' }}>
-        {title}
-      </span>
-      {suffix && <span className="text-[14px]" style={{ color: MUTED }}>{suffix}</span>}
-      {action && <div className="ml-auto">{action}</div>}
+    <div className="mb-3.5 flex min-w-0 shrink-0 items-center gap-2">
+      <span className="shrink-0" style={{ color: INK }}>{icon}</span>
+      <span className="min-w-0 shrink truncate text-[15px] font-semibold">{title}</span>
+      {suffix && <span className="min-w-0 shrink truncate text-[14px]" style={{ color: MUTED }}>{suffix}</span>}
+      {action && <div className="ml-auto shrink-0 pl-1">{action}</div>}
     </div>
   )
 }
@@ -143,6 +143,18 @@ function TimetableSection({ data }: { data: HomeData }): JSX.Element {
   const open = (urls: string[]): void => urls.forEach((u) => void window.api.shell.openExternal(u))
   const hasClasses = data.classes.some((c) => withinSem(data.today, c.semStart, c.semEnd))
 
+  // hide the "바로 가기" button when the card is narrow — the whole card is clickable instead
+  const [cardNarrow, setCardNarrow] = useState(false)
+  const roRef = useRef<ResizeObserver | null>(null)
+  const cardRef = useCallback((node: HTMLDivElement | null) => {
+    roRef.current?.disconnect()
+    if (node && typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => setCardNarrow(node.offsetWidth < 340))
+      ro.observe(node)
+      roRef.current = ro
+    }
+  }, [])
+
   let next: { title: string; professor: string; links: string[]; when: string } | null = null
   for (let off = 0; off < 7 && !next; off++) {
     const w = (todayW + off) % 7
@@ -160,23 +172,32 @@ function TimetableSection({ data }: { data: HomeData }): JSX.Element {
       </div>
 
       {next && (
-        <div className="flex shrink-0 items-center justify-between gap-3 rounded-[14px] border px-[17px] py-[15px]" style={{ borderColor: '#e8e8ec' }}>
-          <div className="flex items-center gap-[13px]">
+        <div
+          ref={cardRef}
+          onClick={next.links.length > 0 ? () => open(next!.links) : undefined}
+          role={next.links.length > 0 ? 'button' : undefined}
+          title={next.links.length > 0 ? '바로 가기' : undefined}
+          className={`flex shrink-0 items-center justify-between gap-3 rounded-[14px] border px-[17px] py-[15px] ${
+            next.links.length > 0 ? 'cursor-pointer transition hover:bg-black/[0.02]' : ''
+          }`}
+          style={{ borderColor: '#e8e8ec' }}
+        >
+          <div className="flex min-w-0 items-center gap-[13px]">
             <div className="flex h-[38px] w-[38px] flex-none items-center justify-center rounded-[10px]" style={{ background: '#f4f4f7' }}>
               <Clock size={19} strokeWidth={1.7} style={{ color: INK }} />
             </div>
             <div className="min-w-0">
               <div className="truncate text-[14.5px] font-semibold">다음 수업 · {next.title}</div>
-              <div className="mt-[3px] text-[13px]" style={{ color: MUTED }}>
+              <div className="mt-[3px] truncate text-[13px]" style={{ color: MUTED }}>
                 {next.when}
                 {next.professor ? ` · ${next.professor}` : ''}
               </div>
             </div>
           </div>
-          {next.links.length > 0 && (
-            <button onClick={() => open(next!.links)} className="flex-none rounded-[10px] px-4 py-2.5 text-[13.5px] font-semibold text-white" style={{ background: ACCENT }}>
+          {next.links.length > 0 && !cardNarrow && (
+            <span className="flex-none rounded-[10px] px-4 py-2.5 text-[13.5px] font-semibold text-white" style={{ background: ACCENT }}>
               바로 가기
-            </button>
+            </span>
           )}
         </div>
       )}
@@ -257,8 +278,8 @@ function DDaySection({ data, refresh, grow }: { data: HomeData; refresh: () => v
                   <div className="truncate text-[14px] font-semibold" style={{ color: INK }}>{e.title}</div>
                   <div className="mt-[3px] text-[12.5px]" style={{ color: MUTED }}>{fmtDateK(e.date)}</div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[18px] font-bold tabular-nums" style={{ color: ddColor(n) }}>{n === 0 ? 'D-DAY' : `D-${n}`}</span>
+                <div className="flex flex-none items-center gap-2 pl-2">
+                  <span className="whitespace-nowrap text-[18px] font-bold tabular-nums" style={{ color: ddColor(n) }}>{n === 0 ? 'D-DAY' : `D-${n}`}</span>
                   <button onClick={() => del(e)} className="rounded p-1 text-subtle opacity-0 hover:text-red-500 group-hover:opacity-100">
                     <Trash2 size={12} />
                   </button>
@@ -384,15 +405,108 @@ function StudyTimeSection({ data }: { data: HomeData }): JSX.Element {
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto">
           {folders.map((f) => (
-            <div key={f.folderId} className="grid items-center gap-3" style={{ gridTemplateColumns: '96px 1fr 66px' }}>
+            <div key={f.folderId} className="grid items-center gap-3" style={{ gridTemplateColumns: 'minmax(56px,84px) 1fr auto' }}>
               <span className="truncate text-[13.5px]" style={{ color: INK }}>{f.name}</span>
               <span className="block h-2 rounded-full" style={{ background: '#f0f0f3' }}>
                 <span className="block h-full rounded-full" style={{ width: `${(f.studySec / max) * 100}%`, background: ACCENT }} />
               </span>
-              <span className="text-right text-[12.5px] tabular-nums" style={{ color: MUTED }}>{fmtStudy(f.studySec)}</span>
+              <span className="whitespace-nowrap text-right text-[12.5px] tabular-nums" style={{ color: MUTED }}>{fmtStudy(f.studySec)}</span>
             </div>
           ))}
         </div>
+      )}
+    </div>
+  )
+}
+
+// ───────────────────────── 이번 달 API 사용 금액 ─────────────────────────
+const PROVIDER_LABEL: Record<string, string> = { meta: 'Meta', openai: 'OpenAI' }
+const PROVIDER_COLOR: Record<string, string> = { meta: ACCENT, openai: '#b6bac2' }
+
+function ApiCostSection({ data }: { data: HomeData }): JSX.Element {
+  const fx = useStore((s) => s.fxUsdKrw)
+  const rate = fx?.rate ?? 1350
+  const now = new Date(data.today + 'T00:00')
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()
+  // per-day, per-provider USD
+  const byDay: Record<string, number>[] = Array.from({ length: daysInMonth }, () => ({}))
+  const byProvider: Record<string, number> = {}
+  let total = 0
+  let estimate = false
+  for (const r of data.apiUsage) {
+    const d = new Date(r.ts).getDate() - 1
+    if (d < 0 || d >= daysInMonth) continue
+    byDay[d][r.provider] = (byDay[d][r.provider] ?? 0) + r.usd
+    byProvider[r.provider] = (byProvider[r.provider] ?? 0) + r.usd
+    total += r.usd
+    estimate ||= r.estimate
+  }
+  const maxDay = Math.max(1e-9, ...byDay.map((d) => Object.values(d).reduce((a, b) => a + b, 0)))
+  const krw = (usd: number): string => `₩${Math.round(usd * rate).toLocaleString('ko-KR')}`
+  const providers = Object.keys(byProvider).sort((a, b) => byProvider[b] - byProvider[a])
+  return (
+    <div className="flex min-h-0 flex-col">
+      <Head
+        icon={<Coins size={18} strokeWidth={1.7} />}
+        title="이번 달 API 사용 금액"
+        suffix={`· ${now.getMonth() + 1}월`}
+        action={
+          <span className="text-[14px] font-semibold tabular-nums" style={{ color: INK }} title={`$${total.toFixed(3)} · 환율 $1 = ₩${rate.toLocaleString('ko-KR', { maximumFractionDigits: 1 })}`}>
+            {estimate ? '≈' : ''}{krw(total)}
+          </span>
+        }
+      />
+      {data.apiUsage.length === 0 ? (
+        <p className="text-[12.5px]" style={{ color: MUTED }}>클라우드 전사(Meta · OpenAI)를 쓰면 날짜별 비용이 쌓여요.</p>
+      ) : (
+        <>
+          <div className="flex h-[72px] items-end gap-[3px]">
+            {byDay.map((d, i) => {
+              const dayUsd = Object.values(d).reduce((a, b) => a + b, 0)
+              const isToday = i === now.getDate() - 1
+              return (
+                <div
+                  key={i}
+                  className="flex min-w-0 flex-1 flex-col justify-end"
+                  style={{ height: '100%' }}
+                  title={`${now.getMonth() + 1}월 ${i + 1}일 · ${krw(dayUsd)}${
+                    dayUsd ? ' (' + Object.entries(d).map(([p, u]) => `${PROVIDER_LABEL[p] ?? p} ${krw(u)}`).join(', ') + ')' : ''
+                  }`}
+                >
+                  {providers
+                    .slice()
+                    .reverse()
+                    .map((p) => (
+                      <span
+                        key={p}
+                        className="block w-full"
+                        style={{
+                          height: `${((d[p] ?? 0) / maxDay) * 100}%`,
+                          background: PROVIDER_COLOR[p] ?? '#c9cbd3',
+                          borderRadius: '2px 2px 0 0',
+                          minHeight: d[p] ? 2 : 0
+                        }}
+                      />
+                    ))}
+                  {!dayUsd && <span className="block w-full" style={{ height: 2, background: isToday ? '#d9dbe3' : '#f0f0f3', borderRadius: 1 }} />}
+                </div>
+              )
+            })}
+          </div>
+          <div className="mt-1.5 flex items-center justify-between text-[11px] tabular-nums" style={{ color: MUTED }}>
+            <span>1일</span>
+            <span>{daysInMonth}일</span>
+          </div>
+          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[12px]" style={{ color: MUTED }}>
+            {providers.map((p) => (
+              <span key={p} className="flex items-center gap-1.5">
+                <span className="inline-block h-2 w-2 rounded-sm" style={{ background: PROVIDER_COLOR[p] ?? '#c9cbd3' }} />
+                {PROVIDER_LABEL[p] ?? p} <span style={{ color: INK }}>{krw(byProvider[p])}</span>
+              </span>
+            ))}
+            {estimate && <span>· OpenAI는 정가 기준 추정</span>}
+          </div>
+        </>
       )}
     </div>
   )
@@ -421,7 +535,7 @@ function RetentionSection({ data }: { data: HomeData }): JSX.Element {
             <select
               value={cur?.folderId ?? ''}
               onChange={(e) => setSel(Number(e.target.value))}
-              className="max-w-[150px] truncate rounded-md border border-black/10 bg-white px-2 py-1 text-[12px] outline-none focus:border-accent"
+              className="w-[104px] shrink-0 truncate rounded-md border border-black/10 bg-white px-2 py-1 text-[12px] outline-none focus:border-accent"
               style={{ color: INK }}
             >
               {folders.map((f) => (
@@ -466,16 +580,26 @@ function RetentionSection({ data }: { data: HomeData }): JSX.Element {
 function FeynmanSection({ data, grow }: { data: HomeData; grow?: boolean }): JSX.Element {
   const setStudioView = useStore((s) => s.setStudioView)
   const selectMemo = useStore((s) => s.selectMemo)
+  const openFolderView = useStore((s) => s.openFolderView)
+  const refreshStudioItems = useStore((s) => s.refreshStudioItems)
   const closeHome = useStore((s) => s.closeHome)
   const folderName = (id: number | null): string => data.folders.find((x) => x.folderId === id)?.name ?? ''
-  const resume = async (memoId: number, itemId: number): Promise<void> => {
+  const resume = async (f: HomeData['feynmanInProgress'][number]): Promise<void> => {
     closeHome()
-    await selectMemo(memoId)
-    setStudioView({ mode: 'feynman', itemId })
+    if (f.memoId) {
+      await selectMemo(f.memoId) // note-scoped session
+    } else if (f.folderId != null) {
+      // folder-scoped session (memoId 0): open the folder workspace + load its studio items first
+      await openFolderView(f.folderId)
+      await refreshStudioItems()
+    } else {
+      return
+    }
+    setStudioView({ mode: f.kind === 'tutor' ? 'tutor' : 'feynman', itemId: f.itemId })
   }
   return (
     <div className={`flex min-h-0 flex-col ${grow ? 'flex-1' : ''}`}>
-      <Head icon={<NotebookPen size={18} strokeWidth={1.7} />} title="진행 중인 파인만 복습" />
+      <Head icon={<NotebookPen size={18} strokeWidth={1.7} />} title="진행 중인 복습" />
       {data.feynmanInProgress.length === 0 ? (
         <p className="text-[12.5px]" style={{ color: MUTED }}>진행 중인 복습이 없어요.</p>
       ) : (
@@ -483,7 +607,7 @@ function FeynmanSection({ data, grow }: { data: HomeData; grow?: boolean }): JSX
           {data.feynmanInProgress.map((f) => {
             const fname = folderName(f.folderId)
             return (
-            <button key={f.itemId} onClick={() => void resume(f.memoId, f.itemId)} className="rounded-[12px] px-[14px] py-3 text-left" style={{ background: SOFTBG }}>
+            <button key={f.itemId} onClick={() => void resume(f)} className="rounded-[12px] px-[14px] py-3 text-left" style={{ background: SOFTBG }}>
               {fname && <div className="mb-1 text-[11px] font-semibold" style={{ color: '#6f7bd0' }}>{fname}</div>}
               <div className="mb-[9px] flex items-center gap-2.5">
                 <span className="min-w-0 flex-1 truncate text-[13.5px] font-medium" style={{ color: INK }}>{f.title}</span>
@@ -544,7 +668,7 @@ export function Home(): JSX.Element {
     void refreshHome()
   }, [refreshHome])
 
-  const data: HomeData = homeData ?? { today: todayLocal(), timetable: null, classes: [], events: [], folders: [], feynmanInProgress: [], favorites: [] }
+  const data: HomeData = homeData ?? { today: todayLocal(), timetable: null, classes: [], events: [], folders: [], feynmanInProgress: [], favorites: [], apiUsage: [] }
   const niceToday = (() => {
     const d = new Date(data.today + 'T00:00')
     return `${d.getMonth() + 1}월 ${d.getDate()}일 (${WD[d.getDay()]})`
@@ -558,21 +682,22 @@ export function Home(): JSX.Element {
           <div className="text-[15px]" style={{ color: MUTED }}>{niceToday}</div>
         </div>
 
-        <div className="grid min-h-0 flex-1 grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)_minmax(0,1fr)]">
+        <div className="grid min-h-0 flex-1 grid-cols-1 gap-x-6 gap-y-8 lg:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)_minmax(0,1fr)]">
           {/* LEFT */}
-          <div className="flex min-h-0 flex-col gap-6">
+          <div className="flex min-h-0 min-w-0 flex-col gap-6">
             <TimetableSection data={data} />
             <FavoritesSection data={data} grow />
           </div>
           {/* MIDDLE — D-Day · 일정 · 할 일 each fixed at 1/3 column height */}
-          <div className="flex min-h-0 flex-col gap-6">
+          <div className="flex min-h-0 min-w-0 flex-col gap-6">
             <DDaySection data={data} refresh={refreshHome} grow />
             <TodaySection data={data} grow />
             <TodoSection data={data} refresh={refreshHome} grow />
           </div>
           {/* RIGHT */}
-          <div className="flex min-h-0 flex-col gap-6">
+          <div className="flex min-h-0 min-w-0 flex-col gap-6">
             <StudyTimeSection data={data} />
+            <ApiCostSection data={data} />
             <RetentionSection data={data} />
             <FeynmanSection data={data} grow />
           </div>

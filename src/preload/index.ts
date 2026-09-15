@@ -26,12 +26,20 @@ import type {
   AiEngine,
   StudioItem,
   Timetable,
-  TimetableClass
+  TimetableClass,
+  ApiUsageRow,
+  UpdateState,
+  NotionStatus,
+  NotionTarget,
+  NotionExportPayload
 } from '../shared/types'
 
 const api = {
   app: {
-    dataDir: (): Promise<string> => ipcRenderer.invoke('app:dataDir')
+    dataDir: (): Promise<string> => ipcRenderer.invoke('app:dataDir'),
+    version: (): Promise<string> => ipcRenderer.invoke('app:version'),
+    /** 'darwin' | 'win32' | 'linux' — synchronous, so components can gate mac-only options at render time */
+    platform: process.platform
   },
   window: {
     setCompact: (on: boolean): Promise<void> => ipcRenderer.invoke('window:setCompact', on),
@@ -49,6 +57,7 @@ const api = {
       ipcRenderer.invoke('folders:create', name, parentId),
     rename: (id: number, name: string): Promise<void> => ipcRenderer.invoke('folders:rename', id, name),
     setFavorite: (id: number, fav: boolean): Promise<void> => ipcRenderer.invoke('folders:setFavorite', id, fav),
+    setArchived: (id: number, archived: boolean): Promise<void> => ipcRenderer.invoke('folders:setArchived', id, archived),
     delete: (id: number): Promise<void> => ipcRenderer.invoke('folders:delete', id)
   },
   memos: {
@@ -133,6 +142,7 @@ const api = {
     setGptModel: (model: string): Promise<void> => ipcRenderer.invoke('ai:setGptModel', model),
     setGptReasoning: (effort: string): Promise<void> => ipcRenderer.invoke('ai:setGptReasoning', effort),
     setClaudeEffort: (effort: string): Promise<void> => ipcRenderer.invoke('ai:setClaudeEffort', effort),
+    setAgyModel: (model: string): Promise<void> => ipcRenderer.invoke('ai:setAgyModel', model),
     setAnthropicKey: (key: string): Promise<void> => ipcRenderer.invoke('ai:setAnthropicKey', key),
     setGeminiKey: (key: string): Promise<void> => ipcRenderer.invoke('ai:setGeminiKey', key),
     setApiModel: (provider: string, model: string): Promise<void> => ipcRenderer.invoke('ai:setApiModel', provider, model),
@@ -140,7 +150,12 @@ const api = {
     setOpenaiKey: (key: string): Promise<void> => ipcRenderer.invoke('ai:setOpenaiKey', key),
     setTranscribeModel: (model: string): Promise<void> => ipcRenderer.invoke('ai:setTranscribeModel', model),
     setSttModel: (model: string): Promise<void> => ipcRenderer.invoke('ai:setSttModel', model),
+    setSttLanguage: (lang: string): Promise<void> => ipcRenderer.invoke('ai:setSttLanguage', lang),
+    setMetaKey: (key: string): Promise<void> => ipcRenderer.invoke('ai:setMetaKey', key),
+    setCorrectFollowDelay: (n: number): Promise<void> => ipcRenderer.invoke('ai:setCorrectFollowDelay', n),
     setRealtimePreview: (on: boolean): Promise<void> => ipcRenderer.invoke('ai:setRealtimePreview', on),
+    /** drop the sticky usage-limit fallback → next task tries the primary provider again */
+    clearFallback: (): Promise<void> => ipcRenderer.invoke('ai:clearFallback'),
     /** notified when a task auto-fell-back to another provider on a usage/quota limit */
     onFallback: (cb: (d: { from: string; to: string }) => void): (() => void) => {
       const l = (_e: unknown, d: { from: string; to: string }): void => cb(d)
@@ -158,8 +173,9 @@ const api = {
       ipcRenderer.invoke('claude:extractKeywords', pdfText, systemPrompt),
     correct: (transcript: string, systemPrompt: string): Promise<string> =>
       ipcRenderer.invoke('claude:correct', transcript, systemPrompt),
-    correctChunk: (context: string, followContext: string, chunk: string, systemPrompt: string, model?: string): Promise<string> =>
-      ipcRenderer.invoke('claude:correctChunk', context, followContext, chunk, systemPrompt, model),
+    /** `translate` = target language code (e.g. 'ko') → the response is JSON {text, ko} with a translation */
+    correctChunk: (context: string, followContext: string, chunk: string, systemPrompt: string, model?: string, translate?: string): Promise<string> =>
+      ipcRenderer.invoke('claude:correctChunk', context, followContext, chunk, systemPrompt, model, translate),
     structure: (segments: string[], systemPrompt: string, model?: string): Promise<string> =>
       ipcRenderer.invoke('claude:structure', segments, systemPrompt, model),
     quiz: (
@@ -217,7 +233,11 @@ const api = {
       ipcRenderer.invoke('recordings:export', path),
     exportMp4: (path: string, title?: string): Promise<{ canceled: boolean; path?: string }> =>
       ipcRenderer.invoke('recordings:exportMp4', path, title),
-    reveal: (path: string): Promise<void> => ipcRenderer.invoke('recordings:reveal', path)
+    reveal: (path: string): Promise<void> => ipcRenderer.invoke('recordings:reveal', path),
+    /** file picker → converted take (48k PCM) + 16k WAV for the sidecar; null when canceled */
+    importAudio: (memoId: number): Promise<{ takePath: string; wavPath: string; durationSec: number; name: string } | null> =>
+      ipcRenderer.invoke('recordings:importAudio', memoId),
+    discardImport: (paths: string[]): Promise<void> => ipcRenderer.invoke('recordings:discardImport', paths)
   },
   calendar: {
     saveIcs: (events: CalEvent[], title?: string): Promise<{ canceled: boolean; path?: string; count: number }> =>
@@ -287,6 +307,9 @@ const api = {
       ipcRenderer.invoke('pdfs:extractKeywordsFromImages', images, systemPrompt),
     getExtractedPages: (id: number): Promise<string[] | null> => ipcRenderer.invoke('pdfs:getExtractedPages', id),
     setExtractedPages: (id: number, pages: string[]): Promise<void> => ipcRenderer.invoke('pdfs:setExtractedPages', id, pages),
+    getPageEmbeddings: (id: number): Promise<{ model: string; dims: number; vectors: number[][] } | null> => ipcRenderer.invoke('pdfs:getPageEmbeddings', id),
+    setPageEmbeddings: (id: number, data: { model: string; dims: number; vectors: number[][] } | null): Promise<void> =>
+      ipcRenderer.invoke('pdfs:setPageEmbeddings', id, data),
     ocrPages: (images: Uint8Array[], startPage: number, systemPrompt: string): Promise<string> =>
       ipcRenderer.invoke('pdfs:ocrPages', images, startPage, systemPrompt)
   },
@@ -318,6 +341,29 @@ const api = {
       ipcRenderer.on(channel, listener)
       return ipcRenderer
         .invoke('studio:chatStream', id, manifest, history, userMessage, hasPdfs, multiMemo, systemPrompt, model, command)
+        .finally(() => ipcRenderer.removeListener(channel, listener))
+    },
+    tutorStream: (
+      id: string,
+      manifest: string,
+      history: { role: 'user' | 'assistant'; content: string }[],
+      userMessage: string,
+      stateJson: string,
+      mode: 'learn' | 'sprint',
+      subject: string,
+      hasPdfs: boolean,
+      multiMemo: boolean,
+      systemPrompt: string,
+      model: string | undefined,
+      onDelta: (full: string) => void
+    ): Promise<string> => {
+      const channel = `claude:stream:${id}`
+      const listener = (_e: unknown, m: { type: string; text: string }): void => {
+        if (m.type === 'delta') onDelta(m.text)
+      }
+      ipcRenderer.on(channel, listener)
+      return ipcRenderer
+        .invoke('studio:tutorStream', id, manifest, history, userMessage, stateJson, mode, subject, hasPdfs, multiMemo, systemPrompt, model)
         .finally(() => ipcRenderer.removeListener(channel, listener))
     },
     feynmanGrade: (
@@ -357,6 +403,26 @@ const api = {
     }): Promise<{ id: string }> => ipcRenderer.invoke('annotations:upsert', payload),
     delete: (id: string): Promise<void> => ipcRenderer.invoke('annotations:delete', id)
   },
+  update: {
+    status: (): Promise<UpdateState> => ipcRenderer.invoke('update:status'),
+    check: (): Promise<UpdateState> => ipcRenderer.invoke('update:check'),
+    install: (): Promise<void> => ipcRenderer.invoke('update:install'),
+    onStatus: (cb: (s: UpdateState) => void): (() => void) => {
+      const l = (_e: unknown, s: UpdateState): void => cb(s)
+      ipcRenderer.on('update:status', l)
+      return () => ipcRenderer.removeListener('update:status', l)
+    }
+  },
+  usage: {
+    add: (row: Omit<ApiUsageRow, 'id'>): Promise<void> => ipcRenderer.invoke('usage:add', row)
+  },
+  prefs: {
+    get: (key: string): Promise<string | null> => ipcRenderer.invoke('prefs:get', key),
+    set: (key: string, value: string): Promise<void> => ipcRenderer.invoke('prefs:set', key, value)
+  },
+  fx: {
+    usdKrw: (): Promise<{ rate: number; at: number; source: string }> => ipcRenderer.invoke('fx:usdKrw')
+  },
   settings: {
     recordingsDir: (): Promise<string> => ipcRenderer.invoke('settings:recordingsDir'),
     chooseRecordingsDir: (): Promise<string> => ipcRenderer.invoke('settings:chooseRecordingsDir'),
@@ -364,8 +430,17 @@ const api = {
     openRecordingsDir: (): Promise<void> => ipcRenderer.invoke('settings:openRecordingsDir'),
     getVad: (): Promise<{ silenceSec: number; maxSec: number }> => ipcRenderer.invoke('settings:getVad'),
     setVad: (silenceSec: number, maxSec: number): Promise<void> => ipcRenderer.invoke('settings:setVad', silenceSec, maxSec),
-    getTranscribe: (): Promise<{ engine: string; apiKey: string; oaiModel: string; realtimePreview: boolean }> =>
+    getTranscribe: (): Promise<{ engine: string; apiKey: string; oaiModel: string; realtimePreview: boolean; metaKey: string }> =>
       ipcRenderer.invoke('settings:getTranscribe')
+  },
+  notion: {
+    status: (): Promise<NotionStatus> => ipcRenderer.invoke('notion:status'),
+    /** validates against Notion, then saves (throws with a friendly message on a bad token) */
+    setToken: (token: string): Promise<NotionStatus> => ipcRenderer.invoke('notion:setToken', token),
+    clear: (): Promise<void> => ipcRenderer.invoke('notion:clear'),
+    search: (query: string): Promise<NotionTarget[]> => ipcRenderer.invoke('notion:search', query),
+    setParent: (target: NotionTarget | null): Promise<NotionStatus> => ipcRenderer.invoke('notion:setParent', target),
+    exportPage: (payload: NotionExportPayload): Promise<{ url: string; id: string }> => ipcRenderer.invoke('notion:export', payload)
   },
   export: {
     memo: (payload: { title: string; format: ExportFormat; data: string }): Promise<{ canceled: boolean; path?: string }> =>

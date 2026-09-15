@@ -22,7 +22,8 @@ import type {
   Segment,
   StudioItem,
   Timetable,
-  TimetableClass
+  TimetableClass,
+  ApiUsageRow
 } from '../shared/types'
 
 let db: Database.Database
@@ -96,6 +97,16 @@ export function initDb(): void {
       t_end REAL NOT NULL,
       text TEXT NOT NULL,
       ord INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE IF NOT EXISTS api_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      provider TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      audio_sec REAL NOT NULL DEFAULT 0,
+      usd REAL NOT NULL DEFAULT 0,
+      estimate INTEGER NOT NULL DEFAULT 0,
+      memo_id INTEGER
     );
     CREATE TABLE IF NOT EXISTS agents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -307,9 +318,21 @@ export function initDb(): void {
   } catch {
     /* column already exists */
   }
+  // Korean translation of a foreign-language chunk (filled by live correction when 전사 언어 ≠ 한국어)
+  try {
+    db.exec('ALTER TABLE segments ADD COLUMN translation TEXT')
+  } catch {
+    /* column already exists */
+  }
   // per-page extracted text cache for studio citations (JSON string[]; null = not indexed yet)
   try {
     db.exec('ALTER TABLE pdfs ADD COLUMN extracted_pages TEXT')
+  } catch {
+    /* column already exists */
+  }
+  // per-page sentence embeddings for 교안 auto page-turn (JSON {model,dims,vectors}; null = none)
+  try {
+    db.exec('ALTER TABLE pdfs ADD COLUMN page_embeddings TEXT')
   } catch {
     /* column already exists */
   }
@@ -324,6 +347,12 @@ export function initDb(): void {
   // favorites (별표) on folders + notes
   try {
     db.exec('ALTER TABLE folders ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0')
+  } catch {
+    /* exists */
+  }
+  // archived folders stay in the DB with their notes but are hidden from the sidebar
+  try {
+    db.exec('ALTER TABLE folders ADD COLUMN archived INTEGER NOT NULL DEFAULT 0')
   } catch {
     /* exists */
   }
@@ -432,9 +461,34 @@ function seedDefaults(): void {
 
 // ---- Folders ----
 export function listFolders(): Folder[] {
-  return (db.prepare('SELECT id, name, parent_id AS parentId, created_at AS createdAt, favorite FROM folders ORDER BY created_at ASC').all() as any[]).map(
-    (r) => ({ id: r.id, name: r.name, parentId: r.parentId, createdAt: r.createdAt, favorite: !!r.favorite })
+  return (
+    db.prepare('SELECT id, name, parent_id AS parentId, created_at AS createdAt, favorite, archived FROM folders ORDER BY created_at ASC').all() as any[]
+  ).map((r) => ({ id: r.id, name: r.name, parentId: r.parentId, createdAt: r.createdAt, favorite: !!r.favorite, archived: !!r.archived }))
+}
+
+// ---- cloud API usage (transcription engines) — feeds the dashboard cost chart ----
+export function addApiUsage(row: Omit<ApiUsageRow, 'id'>): void {
+  db.prepare('INSERT INTO api_usage (ts, provider, kind, audio_sec, usd, estimate, memo_id) VALUES (?, ?, ?, ?, ?, ?, ?)').run(
+    row.ts, row.provider, row.kind, row.audioSec, row.usd, row.estimate ? 1 : 0, row.memoId ?? null
   )
+}
+
+export function listApiUsage(fromTs: number, toTs: number): ApiUsageRow[] {
+  return (
+    db.prepare('SELECT id, ts, provider, kind, audio_sec AS audioSec, usd, estimate, memo_id AS memoId FROM api_usage WHERE ts >= ? AND ts < ? ORDER BY ts ASC').all(fromTs, toTs) as any[]
+  ).map((r) => ({ ...r, estimate: !!r.estimate }))
+}
+
+/** generic small preferences (namespaced so they can't collide with typed settings) */
+export function getPref(key: string): string | null {
+  return getSetting(`pref:${key}`)
+}
+export function setPref(key: string, value: string): void {
+  setSetting(`pref:${key}`, value)
+}
+
+export function setFolderArchived(id: number, archived: boolean): void {
+  db.prepare('UPDATE folders SET archived = ? WHERE id = ?').run(archived ? 1 : 0, id)
 }
 
 export function setFolderFavorite(id: number, fav: boolean): void {
@@ -514,7 +568,7 @@ export function getMemo(id: number): Memo | null {
   if (!r) return null
   const segments = db
     .prepare(
-      'SELECT id, memo_id AS memoId, t_start AS tStart, t_end AS tEnd, text, orig_text AS origText, pdf_id AS pdfId, pdf_page AS pdfPage FROM segments WHERE memo_id = ? ORDER BY ord ASC, t_start ASC'
+      'SELECT id, memo_id AS memoId, t_start AS tStart, t_end AS tEnd, text, orig_text AS origText, pdf_id AS pdfId, pdf_page AS pdfPage, translation FROM segments WHERE memo_id = ? ORDER BY ord ASC, t_start ASC'
     )
     .all(id) as Segment[]
   return {
@@ -552,9 +606,17 @@ export function setMemoBookmarks(id: number, bookmarks: number[]): void {
 
 export function createMemo(opts: { folderId: number | null; title: string; agentId: number | null }): Memo {
   const now = Date.now()
+  // place new notes at the BOTTOM of their sibling list: give them an ord past the current max
+  // (once any sibling has been drag-reordered its ord is 10/20/30…, so ord=0 would sort to the top)
+  const maxRow = (
+    opts.folderId === null
+      ? db.prepare('SELECT COALESCE(MAX(ord), 0) AS m FROM memos WHERE folder_id IS NULL')
+      : db.prepare('SELECT COALESCE(MAX(ord), 0) AS m FROM memos WHERE folder_id = ?')
+  ).get(...(opts.folderId === null ? [] : [opts.folderId])) as { m: number }
+  const ord = (maxRow?.m ?? 0) + 10
   const info = db
-    .prepare('INSERT INTO memos (folder_id, title, created_at, updated_at, agent_id) VALUES (?, ?, ?, ?, ?)')
-    .run(opts.folderId, opts.title, now, now, opts.agentId)
+    .prepare('INSERT INTO memos (folder_id, title, created_at, updated_at, agent_id, ord) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(opts.folderId, opts.title, now, now, opts.agentId, ord)
   return getMemo(Number(info.lastInsertRowid))!
 }
 
@@ -568,9 +630,11 @@ export function updateMemoTranscript(id: number, transcriptMd: string, segments?
     if (segments) {
       db.prepare('DELETE FROM segments WHERE memo_id = ?').run(id)
       const ins = db.prepare(
-        'INSERT INTO segments (memo_id, t_start, t_end, text, ord, pdf_id, pdf_page, orig_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO segments (memo_id, t_start, t_end, text, ord, pdf_id, pdf_page, orig_text, translation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
-      segments.forEach((s, i) => ins.run(id, s.tStart, s.tEnd, s.text, i, s.pdfId ?? null, s.pdfPage ?? null, s.origText ?? null))
+      segments.forEach((s, i) =>
+        ins.run(id, s.tStart, s.tEnd, s.text, i, s.pdfId ?? null, s.pdfPage ?? null, s.origText ?? null, s.translation ?? null)
+      )
     }
   })
   tx()
@@ -1349,6 +1413,28 @@ export function getPdfExtractedPages(id: number): string[] | null {
 
 export function setPdfExtractedPages(id: number, pagesJson: string): void {
   db.prepare('UPDATE pdfs SET extracted_pages = ? WHERE id = ?').run(pagesJson, id)
+  // page text changed (re-index / OCR) → cached page vectors are stale
+  db.prepare('UPDATE pdfs SET page_embeddings = NULL WHERE id = ?').run(id)
+}
+
+// ---- PDF page embeddings cache (교안 auto page-turn) ----
+export interface PdfPageEmbeddings {
+  model: string
+  dims: number
+  vectors: number[][]
+}
+export function getPdfPageEmbeddings(id: number): PdfPageEmbeddings | null {
+  const r = db.prepare('SELECT page_embeddings FROM pdfs WHERE id = ?').get(id) as { page_embeddings: string | null } | undefined
+  if (!r?.page_embeddings) return null
+  try {
+    const o = JSON.parse(r.page_embeddings) as PdfPageEmbeddings
+    return o && Array.isArray(o.vectors) ? o : null
+  } catch {
+    return null
+  }
+}
+export function setPdfPageEmbeddings(id: number, data: PdfPageEmbeddings | null): void {
+  db.prepare('UPDATE pdfs SET page_embeddings = ? WHERE id = ?').run(data ? JSON.stringify(data) : null, id)
 }
 
 // ---- Studio items ----

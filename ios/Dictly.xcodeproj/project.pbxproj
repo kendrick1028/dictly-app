@@ -1,0 +1,483 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		D1C700000000000000000022 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = D1C700000000000000000021 /* WhisperKit */; };
+		D1C700000000000000000024 /* MLX in Frameworks */ = {isa = PBXBuildFile; productRef = D1C700000000000000000025 /* MLX */; };
+		D1C700000000000000000026 /* MLXNN in Frameworks */ = {isa = PBXBuildFile; productRef = D1C700000000000000000027 /* MLXNN */; };
+		D1C700000000000000000028 /* MLXFast in Frameworks */ = {isa = PBXBuildFile; productRef = D1C700000000000000000029 /* MLXFast */; };
+		D1C70000000000000000003B /* DictlyWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = D1C700000000000000000031 /* DictlyWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		D1C700000000000000000101 /* RecordingActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C700000000000000000100 /* RecordingActivityAttributes.swift */; };
+		D1C700000000000000000102 /* RecordingActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1C700000000000000000100 /* RecordingActivityAttributes.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		D1C70000000000000000000A /* Dictly.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Dictly.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D1C700000000000000000031 /* DictlyWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = DictlyWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		D1C700000000000000000100 /* RecordingActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingActivityAttributes.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		D1C700000000000000000001 /* Dictly */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = Dictly;
+			sourceTree = "<group>";
+		};
+		D1C700000000000000000030 /* DictlyWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			explicitFileTypes = {
+			};
+			explicitFolders = (
+			);
+			path = DictlyWidgets;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D1C700000000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1C700000000000000000022 /* WhisperKit in Frameworks */,
+				D1C700000000000000000024 /* MLX in Frameworks */,
+				D1C700000000000000000026 /* MLXNN in Frameworks */,
+				D1C700000000000000000028 /* MLXFast in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D1C700000000000000000037 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		D1C700000000000000000003 = {
+			isa = PBXGroup;
+			children = (
+				D1C700000000000000000001 /* Dictly */,
+				D1C700000000000000000030 /* DictlyWidgets */,
+				D1C700000000000000000103 /* Shared */,
+				D1C700000000000000000004 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		D1C700000000000000000004 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				D1C70000000000000000000A /* Dictly.app */,
+				D1C700000000000000000031 /* DictlyWidgets.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D1C700000000000000000103 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				D1C700000000000000000100 /* RecordingActivityAttributes.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		D1C700000000000000000005 /* Dictly */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D1C700000000000000000006 /* Build configuration list for PBXNativeTarget "Dictly" */;
+			buildPhases = (
+				D1C700000000000000000007 /* Sources */,
+				D1C700000000000000000002 /* Frameworks */,
+				D1C700000000000000000008 /* Resources */,
+				D1C70000000000000000003C /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D1C70000000000000000003A /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				D1C700000000000000000001 /* Dictly */,
+			);
+			name = Dictly;
+			packageProductDependencies = (
+				D1C700000000000000000021 /* WhisperKit */,
+				D1C700000000000000000025 /* MLX */,
+				D1C700000000000000000027 /* MLXNN */,
+				D1C700000000000000000029 /* MLXFast */,
+			);
+			productName = Dictly;
+			productReference = D1C70000000000000000000A /* Dictly.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D1C700000000000000000032 /* DictlyWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D1C700000000000000000033 /* Build configuration list for PBXNativeTarget "DictlyWidgets" */;
+			buildPhases = (
+				D1C700000000000000000036 /* Sources */,
+				D1C700000000000000000037 /* Frameworks */,
+				D1C700000000000000000038 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				D1C700000000000000000030 /* DictlyWidgets */,
+			);
+			name = DictlyWidgets;
+			packageProductDependencies = (
+			);
+			productName = DictlyWidgets;
+			productReference = D1C700000000000000000031 /* DictlyWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		D1C700000000000000000009 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1620;
+				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					D1C700000000000000000005 = {
+						CreatedOnToolsVersion = 16.2;
+					};
+				};
+			};
+			buildConfigurationList = D1C70000000000000000000B /* Build configuration list for PBXProject "Dictly" */;
+			developmentRegion = ko;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				ko,
+				en,
+				Base,
+			);
+			mainGroup = D1C700000000000000000003;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = D1C700000000000000000004 /* Products */;
+			packageReferences = (
+				D1C700000000000000000020 /* XCRemoteSwiftPackageReference "WhisperKit" */,
+				D1C700000000000000000023 /* XCRemoteSwiftPackageReference "mlx-swift" */,
+			);
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D1C700000000000000000005 /* Dictly */,
+				D1C700000000000000000032 /* DictlyWidgets */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		D1C700000000000000000020 /* XCRemoteSwiftPackageReference "WhisperKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/WhisperKit";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.9.0;
+			};
+		};
+		D1C700000000000000000023 /* XCRemoteSwiftPackageReference "mlx-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/ml-explore/mlx-swift";
+			requirement = {
+				kind = exactVersion;
+				version = 0.31.4;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		D1C700000000000000000021 /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1C700000000000000000020 /* XCRemoteSwiftPackageReference "WhisperKit" */;
+			productName = WhisperKit;
+		};
+		D1C700000000000000000025 /* MLX */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1C700000000000000000023 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLX;
+		};
+		D1C700000000000000000027 /* MLXNN */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1C700000000000000000023 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLXNN;
+		};
+		D1C700000000000000000029 /* MLXFast */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = D1C700000000000000000023 /* XCRemoteSwiftPackageReference "mlx-swift" */;
+			productName = MLXFast;
+		};
+/* End XCSwiftPackageProductDependency section */
+
+/* Begin PBXContainerItemProxy section */
+		D1C700000000000000000039 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = D1C700000000000000000009 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D1C700000000000000000032;
+			remoteInfo = DictlyWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		D1C70000000000000000003A /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D1C700000000000000000032 /* DictlyWidgets */;
+			targetProxy = D1C700000000000000000039 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		D1C70000000000000000003C /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				D1C70000000000000000003B /* DictlyWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXResourcesBuildPhase section */
+		D1C700000000000000000008 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D1C700000000000000000038 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		D1C700000000000000000007 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1C700000000000000000101 /* RecordingActivityAttributes.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D1C700000000000000000036 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1C700000000000000000102 /* RecordingActivityAttributes.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		D1C70000000000000000000C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D1C70000000000000000000D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		D1C70000000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Support/Dictly.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 4;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Support/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.leehyunwoo.dictly;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		D1C70000000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = "Support/Dictly.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 4;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Support/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.leehyunwoo.dictly;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		D1C700000000000000000034 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Support/DictlyWidgets.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 4;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Support/WidgetInfo.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Dictly 시간표";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.leehyunwoo.dictly.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		D1C700000000000000000035 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Support/DictlyWidgets.entitlements";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 4;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Support/WidgetInfo.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Dictly 시간표";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.leehyunwoo.dictly.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		D1C700000000000000000006 /* Build configuration list for PBXNativeTarget "Dictly" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D1C70000000000000000000E /* Debug */,
+				D1C70000000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D1C70000000000000000000B /* Build configuration list for PBXProject "Dictly" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D1C70000000000000000000C /* Debug */,
+				D1C70000000000000000000D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D1C700000000000000000033 /* Build configuration list for PBXNativeTarget "DictlyWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D1C700000000000000000034 /* Debug */,
+				D1C700000000000000000035 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = D1C700000000000000000009 /* Project object */;
+}

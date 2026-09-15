@@ -37,7 +37,7 @@ export function BookmarksTab(): JSX.Element {
   if (!memo) return <div />
 
   return (
-    <div className="h-full overflow-y-auto px-4 pb-6 pt-3">
+    <div className="h-full overflow-y-auto px-4 pb-28 pt-3">
       {marked.length === 0 ? (
         <div className="mt-16 text-center text-subtle">
           <Bookmark size={22} className="mx-auto mb-2 opacity-40" />

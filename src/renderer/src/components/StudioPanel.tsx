@@ -1,10 +1,11 @@
 // Right-hand "Studio" pane — NotebookLM-style. Modes: hub (feature grid + saved memos),
 // chat (separate, closed by default — round bubble button in the header), create, viewer.
-import { ArrowLeft, LayoutGrid, MessageCircle, MessageSquare, PanelLeftClose, PanelRightClose } from 'lucide-react'
+import { ArrowLeft, GraduationCap, LayoutGrid, MessageCircle, MessageSquare, PanelLeftClose, PanelRightClose } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import { StudioHub } from './studio/StudioHub'
 import { StudioChat } from './studio/StudioChat'
 import { FeynmanSession } from './studio/FeynmanSession'
+import { TutorSession } from './studio/TutorSession'
 import { StudioMemoViewer, ViewerHeaderCrumb } from './studio/StudioMemoViewer'
 
 export function StudioPanel({ fullscreen = false }: { fullscreen?: boolean }): JSX.Element {
@@ -21,14 +22,14 @@ export function StudioPanel({ fullscreen = false }: { fullscreen?: boolean }): J
       <div className="flex shrink-0 items-center gap-1 px-3 pb-1.5 pt-2.5">
         {viewerItem ? (
           <ViewerHeaderCrumb item={viewerItem} />
-        ) : studioView.mode === 'feynman' ? (
-          // breadcrumb like the viewer: "스튜디오 › 파인만 복습" (스튜디오 → hub)
+        ) : studioView.mode === 'feynman' || studioView.mode === 'tutor' ? (
+          // breadcrumb like the viewer: "스튜디오 › 파인만 복습 / AI 튜터" (스튜디오 → hub)
           <div className="flex min-w-0 items-center gap-1 text-[11px] font-semibold">
             <button onClick={() => setStudioView({ mode: 'hub' })} className="rounded px-0.5 uppercase tracking-wide text-subtle hover:text-ink" title="스튜디오로 돌아가기">
               스튜디오
             </button>
             <span className="text-subtle/50">›</span>
-            <span className="truncate text-ink">파인만 복습</span>
+            <span className="truncate text-ink">{studioView.mode === 'feynman' ? '파인만 복습' : 'AI 튜터'}</span>
           </div>
         ) : (
           <>
@@ -62,6 +63,7 @@ export function StudioPanel({ fullscreen = false }: { fullscreen?: boolean }): J
         {studioView.mode === 'hub' && <StudioHub />}
         {studioView.mode === 'chat' && <StudioChat />}
         {studioView.mode === 'feynman' && <FeynmanSession key={studioView.itemId} itemId={studioView.itemId} />}
+        {studioView.mode === 'tutor' && <TutorSession key={studioView.itemId} itemId={studioView.itemId} />}
         {studioView.mode === 'viewer' && <StudioMemoViewer key={studioView.itemId} itemId={studioView.itemId} />}
       </div>
     </div>
@@ -73,10 +75,13 @@ export function StudioRail(): JSX.Element {
   const studioView = useStore((s) => s.studioView)
   const setStudioView = useStore((s) => s.setStudioView)
   const toggleStudioCollapsed = useStore((s) => s.toggleStudioCollapsed)
+  const liveTutorOpen = useStore((s) => s.liveTutorOpen)
+  const toggleLiveTutor = useStore((s) => s.toggleLiveTutor)
+  const aiReady = useStore((s) => s.aiReady)
 
   const open = (mode: 'hub' | 'chat'): void => {
     setStudioView({ mode })
-    toggleStudioCollapsed()
+    toggleStudioCollapsed() // (also closes the 실시간 튜터 panel — the slot is shared)
   }
 
   return (
@@ -102,6 +107,17 @@ export function StudioRail(): JSX.Element {
         }`}
       >
         <MessageSquare size={17} />
+      </button>
+      <div className="my-0.5 h-px w-6 bg-black/10" />
+      <button
+        onClick={() => toggleLiveTutor()}
+        disabled={!aiReady}
+        title={aiReady ? (liveTutorOpen ? '실시간 튜터 닫기' : '실시간 AI 튜터') : '실시간 튜터 — AI 연결 필요'}
+        className={`flex h-9 w-9 items-center justify-center rounded-xl border transition disabled:opacity-40 ${
+          liveTutorOpen ? 'border-orange-300 bg-orange-50 text-orange-700' : 'border-transparent text-subtle hover:bg-black/5'
+        }`}
+      >
+        <GraduationCap size={17} />
       </button>
     </div>
   )

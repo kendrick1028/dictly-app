@@ -4,6 +4,12 @@ productName: Dictly
 afterPack: scripts/afterPack.cjs
 directories:
   buildResources: build
+# auto-update feed — electron-updater reads latest-mac.yml from this repo's newest release,
+# so publishing a release there updates every installed copy (see src/main/updater.ts)
+publish:
+  provider: github
+  owner: kendrick1028
+  repo: dictly-app
 files:
   - out/**
   - package.json
@@ -35,7 +41,13 @@ mac:
   # notarized distribution; the 32k-file bundle made intermittent timestamp-server failures abort
   # the whole sign. "none" → codesign --timestamp=none (no network) → reliable local signed build.
   timestamp: none
-  target: dmg
+  # dmg = first install (landing page download); zip = what Squirrel.Mac applies for auto-update.
+  # Both must ship in the release, together with latest-mac.yml + blockmaps.
+  target:
+    - target: dmg
+      arch: arm64
+    - target: zip
+      arch: arm64
   # The bundled Python ships its own (3rd-party-signed) native libs (mlx/Metal, numpy,
   # ctranslate2) and compiles Metal kernels at runtime — hardened runtime's library
   # validation + JIT restrictions would block them. Disabled for the local/ad-hoc build;
@@ -44,3 +56,16 @@ mac:
   extendInfo:
     NSMicrophoneUsageDescription: Dictly는 강의·회의 음성을 녹음하여 텍스트로 변환합니다.
     NSScreenCaptureUsageDescription: Dictly는 시스템 오디오를 캡처하여 텍스트로 변환합니다.
+win:
+  icon: build/icon.ico
+  # fixed ASCII names so the landing page can link a stable URL and latest.yml stays simple
+  artifactName: Dictly-${version}-Setup.${ext}
+  target:
+    - target: nsis
+      arch: x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: Dictly
+  # Windows Explorer shows the app under this name; the exe itself is still Dictly-<v>-Setup.exe
+  artifactName: Dictly-${version}-Setup.${ext}

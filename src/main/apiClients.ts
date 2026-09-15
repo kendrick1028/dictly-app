@@ -178,27 +178,47 @@ export async function runOpenAiVision(key: string, imagePaths: string[], instruc
 }
 
 // ───────────────────────────── Gemini ─────────────────────────────
-function geminiUrl(model: string, key: string): string {
-  return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`
+function geminiUrl(model: string, key: string, stream = false): string {
+  const method = stream ? 'streamGenerateContent?alt=sse&' : 'generateContent?'
+  return `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:${method}key=${encodeURIComponent(key)}`
 }
 
 export async function runGemini(key: string, opts: RunClaudeOptions, onDelta?: (full: string) => void): Promise<string> {
   if (!key) throw new Error('Gemini API 키가 없습니다. AI 연결 → API에서 입력하세요.')
   const model = pickModel(opts.model, API_DEFAULTS.gemini)
-  const res = await fetch(geminiUrl(model, key), {
+  const body = JSON.stringify({
+    ...(opts.systemPrompt ? { systemInstruction: { parts: [{ text: opts.systemPrompt }] } } : {}),
+    contents: [{ role: 'user', parts: [{ text: userPrompt(opts) }] }]
+  })
+  const res = await fetch(geminiUrl(model, key, !!onDelta), {
     method: 'POST',
     signal: opts.signal,
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      ...(opts.systemPrompt ? { systemInstruction: { parts: [{ text: opts.systemPrompt }] } } : {}),
-      contents: [{ role: 'user', parts: [{ text: userPrompt(opts) }] }]
-    })
+    body
   })
-  if (!res.ok) throw new Error(`Gemini API ${res.status}: ${(await res.text()).slice(0, 300)}`)
-  const j = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] }
-  const text = (j.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ?? '').trim()
-  if (onDelta) onDelta(text)
-  return text
+  if (!res.ok || (onDelta && !res.body)) throw new Error(`Gemini API ${res.status}: ${(await res.text()).slice(0, 300)}`)
+  if (!onDelta) {
+    const j = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] }
+    return (j.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ?? '').trim()
+  }
+  // SSE streaming: each `data:` line is a chunk with an incremental candidate slice
+  let full = ''
+  await pumpLines(res.body as ReadableStream<Uint8Array>, (line) => {
+    if (!line.startsWith('data:')) return
+    const payload = line.slice(5).trim()
+    if (!payload || payload === '[DONE]') return
+    try {
+      const j = JSON.parse(payload) as { candidates?: { content?: { parts?: { text?: string }[] } }[] }
+      const chunk = j.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('') ?? ''
+      if (chunk) {
+        full += chunk
+        onDelta(full)
+      }
+    } catch {
+      /* keep-alive / partial */
+    }
+  })
+  return full.trim()
 }
 
 export async function runGeminiVision(key: string, imagePaths: string[], instruction: string, systemPrompt: string): Promise<string> {

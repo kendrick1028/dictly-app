@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Trash2, RefreshCw, Loader2, BookOpen, StickyNote } from 'lucide-react'
+import { Trash2, RefreshCw, Loader2, BookOpen, StickyNote, GraduationCap } from 'lucide-react'
 import { Panel, PanelGroup } from 'react-resizable-panels'
 import { useStore } from '../store/useStore'
 import { TranscriptArea } from './TranscriptArea'
+import { RecordBar } from './RecordBar'
 import { PdfSection } from './PdfSection'
 import { StudioPanel, StudioRail } from './StudioPanel'
+import { LiveTutorPanel } from './live/LiveTutorPanel'
 import { NoteEditor } from './notes/NoteEditor'
 import { ResizeHandle } from './ResizeHandle'
 
@@ -25,6 +27,8 @@ export function MemoView(): JSX.Element {
   const lectureNoteId = useStore((s) => s.lectureNoteId)
   const studioCollapsed = useStore((s) => s.studioCollapsed)
   const studioFullscreen = useStore((s) => s.studioFullscreen)
+  const liveTutorOpen = useStore((s) => s.liveTutorOpen)
+  const toggleLiveTutor = useStore((s) => s.toggleLiveTutor)
   const [title, setTitle] = useState('')
   const [titling, setTitling] = useState(false)
 
@@ -96,6 +100,14 @@ export function MemoView(): JSX.Element {
             <StickyNote size={16} />
           </button>
           <button
+            onClick={() => toggleLiveTutor()}
+            disabled={!aiReady}
+            className={`rounded-lg p-1.5 hover:bg-black/5 disabled:opacity-40 ${liveTutorOpen ? 'text-accent' : ''}`}
+            title={!aiReady ? '실시간 튜터 — AI 연결 필요' : liveTutorOpen ? '실시간 튜터 닫기' : '실시간 AI 튜터 열기 — 녹음 중 강의 내용을 아주 쉽게 풀어 설명'}
+          >
+            <GraduationCap size={16} />
+          </button>
+          <button
             onClick={() => requestConfirm('이 메모를 삭제할까요?', () => void deleteMemo(memo.id))}
             className="rounded-lg p-1.5 hover:bg-black/5 hover:text-red-500"
             title="메모 삭제"
@@ -138,9 +150,17 @@ export function MemoView(): JSX.Element {
                   </div>
                 </Panel>
               )}
+              {liveTutorOpen && <ResizeHandle key="h-tutor" dir="h" />}
+              {liveTutorOpen && (
+                <Panel key="tutor" id="tutor" order={4} defaultSize={28} minSize={22} className="min-h-0">
+                  <div className={`${CARD} dictly-anim-in`}>
+                    <LiveTutorPanel />
+                  </div>
+                </Panel>
+              )}
               {studioOpen && <ResizeHandle key="h-studio" dir="h" />}
               {studioOpen && (
-                <Panel key="studio" id="studio" order={4} defaultSize={26} minSize={18} className="min-h-0">
+                <Panel key="studio" id="studio" order={5} defaultSize={26} minSize={18} className="min-h-0">
                   <div className={`${CARD} dictly-anim-in`}>
                     <StudioPanel />
                   </div>
@@ -151,6 +171,8 @@ export function MemoView(): JSX.Element {
           </>
         )}
       </div>
+      {/* recording pill floats at the bottom center of the window (not clipped by any column) */}
+      <RecordBar />
     </div>
   )
 }

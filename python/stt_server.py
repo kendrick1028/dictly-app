@@ -8,7 +8,12 @@ Protocol (text JSON in/out, binary Float32 PCM @16kHz mono in):
   client -> <binary Float32LE frames>
   client -> {type:'flush'}            force-transcribe the buffered utterance
   client -> {type:'stop'}             -> server {type:'stopped'}
-  client -> {type:'refine', wavPath, model, language, initialPrompt}
+  client -> {type:'refine'|'transcribe_file', wavPath, model, language, initialPrompt}
+                                       whole-file transcription (imported recordings)
+  model: 'turbo' | 'large-v3' | 'live' | 'meta'
+         ('live' = Whisper Live streaming engine, python/lightning.py;
+          'meta' = Meta Muse Voice Transcribe cloud — needs metaKey; keywords = vocabulary biasing)
+  language: 'ko' | 'en' | … | 'auto'
 
   server -> {type:'status', state}
   server -> {type:'segment', tStart, tEnd, text, final}
@@ -23,11 +28,14 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 import wave
 
 import numpy as np
 import websockets
+
+from hallucination import is_hallucination
 
 MODELS_DIR = os.environ.get("DICTLY_MODELS_DIR", os.path.join(os.path.dirname(__file__), "models"))
 os.makedirs(MODELS_DIR, exist_ok=True)
@@ -43,6 +51,34 @@ if ENGINE not in ("mlx", "faster"):
     except Exception:  # noqa: BLE001
         ENGINE = "faster"
 print(f"[stt] engine={ENGINE}", flush=True)
+
+if ENGINE == "mlx":
+    import mlx.core as mx
+    import importlib
+    # (mlx_whisper re-exports transcribe() over the module name — import the module explicitly)
+    _mlx_transcribe_mod = importlib.import_module("mlx_whisper.transcribe")
+
+    # mlx_whisper's ModelHolder keeps ONE model — alternating turbo (finals) / base (preview)
+    # calls would reload a model on every switch (~2s for turbo). Replace it with a multi-slot
+    # cache keyed by (repo, dtype) so every model stays resident (and Whisper Live shares the
+    # same turbo instance as chunked finals — no second copy in memory).
+    _mlx_models = {}
+
+    def _get_model_cached(model_path, dtype):
+        key = (str(model_path), str(dtype))
+        m = _mlx_models.get(key)
+        if m is None:
+            from mlx_whisper.load_models import load_model
+            m = load_model(model_path, dtype=dtype)
+            # MLX streams are thread-local: arrays still LAZY after load (the encoder's sinusoid
+            # table, the decoder's causal mask) stay bound to this thread's stream, and evaluating
+            # them from another thread fails ("There is no Stream(gpu, N) in current thread").
+            # Materialize them here so the model is usable from any executor/stepper thread.
+            mx.eval(m.encoder._positional_embedding, m.decoder._mask)
+            _mlx_models[key] = m
+        return m
+
+    _mlx_transcribe_mod.ModelHolder.get_model = classmethod(lambda cls, p, d: _get_model_cached(p, d))
 
 # MLX model repos (HuggingFace, MLX format)
 MLX_REPO = {
@@ -107,12 +143,15 @@ def get_model(name: str):
     """Preload / warm the active engine's model (used for the 'ready' status)."""
     if ENGINE == "mlx":
         repo = MLX_REPO.get(name, name)
-        if repo not in _mlx_loaded:
-            from mlx_whisper.load_models import load_model
-            load_model(repo)  # downloads + caches (shared with transcribe)
-            _mlx_loaded.add(repo)
-        return repo
+        # fp16 = the dtype mlx_whisper.transcribe uses → this IS the instance transcribe reuses
+        # (the old fp32 preload was a separate 1.6GB copy that transcribe never touched)
+        return _get_model_cached(repo, mx.float16)
     return _ct2_model(name)
+
+
+def _lang(language):
+    """'auto' / '' → None (Whisper auto-detects per call)."""
+    return None if language in (None, "", "auto") else language
 
 
 def _decode_file(path):
@@ -125,6 +164,9 @@ def _clean(text):
     """Drop Whisper hallucinations on silence/noise (repeated tokens/phrases)."""
     text = (text or "").strip()
     if not text:
+        return ""
+    # whole-segment hallucinations on silence ("감사합니다", "시청해주셔서 감사합니다", …) → drop
+    if is_hallucination(text):
         return ""
     # U+FFFD = byte-fallback garbage: when a chunk is cut mid-syllable (common with very
     # short chunks), Whisper emits incomplete UTF-8 token bytes that decode to '�'. A few
@@ -147,7 +189,8 @@ def _clean(text):
         if len(out) >= 2 and out[-1] == w and out[-2] == w:
             continue
         out.append(w)
-    return " ".join(out)
+    text = " ".join(out)
+    return "" if is_hallucination(text) else text
 
 
 def _transcribe_array(model_name, audio, language, initial_prompt):
@@ -156,7 +199,7 @@ def _transcribe_array(model_name, audio, language, initial_prompt):
         r = mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=MLX_REPO.get(model_name, model_name),
-            language=(language or None),
+            language=_lang(language),
             initial_prompt=(initial_prompt or None),
             condition_on_previous_text=False,
             verbose=None,
@@ -165,7 +208,7 @@ def _transcribe_array(model_name, audio, language, initial_prompt):
     model = _ct2_model(model_name)
     segments, _info = model.transcribe(
         audio,
-        language=language or None,
+        language=_lang(language),
         initial_prompt=initial_prompt or None,
         beam_size=1,
         vad_filter=False,
@@ -194,7 +237,8 @@ def _openai_transcribe(audio, language, api_key, model):
         "https://api.openai.com/v1/audio/transcriptions",
         headers={"Authorization": f"Bearer {api_key}"},
         files={"file": ("audio.wav", _wav_bytes(audio), "audio/wav")},
-        data={"model": model or "gpt-4o-transcribe", "language": language or "ko", "response_format": "text"},
+        data={"model": model or "gpt-4o-transcribe", "response_format": "text",
+              **({"language": language} if _lang(language) else {})},
         timeout=60,
     )
     if r.status_code != 200:
@@ -223,6 +267,98 @@ def _tail_sentences(text, n=2):
     return " ".join(_split_sentences(text)[-n:])
 
 
+# ---- Meta Muse Voice Transcribe (cloud, optional engine) ----
+# https://dev.meta.ai/docs/speech-to-text/ — realtime WebSocket (handshake auth, raw s16le PCM) and
+# multipart file transcription. ENDPOINTING mode gives one turn per utterance with turn-level
+# timestamps; `keywords` is the model's own vocabulary-biasing list (the app's 용어 사전).
+META_MODEL = "muse-voice-transcribe-1.0"
+META_RT_URL = "wss://api.meta.ai/v1/asr/realtime"
+META_HTTP_URL = "https://api.meta.ai/v1/asr/transcribe"
+META_ROTATE_SEC = 55 * 60      # realtime sessions are capped at 60 min → rotate early
+META_MAX_KEYWORDS = 100
+META_USD_PER_HOUR = 0.18       # billed per whole second of audio processed
+# OpenAI transcription list price: gpt-4o-transcribe $0.006/min. Realtime transcription is billed by
+# audio tokens, so the same rate is used as an ESTIMATE (flagged to the client).
+OPENAI_USD_PER_HOUR = 0.36
+META_LANG_NAMES = {
+    "ko": "Korean", "en": "English", "ja": "Japanese", "zh": "Mandarin Chinese", "fr": "French",
+    "de": "German", "es": "Spanish", "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ru": None,
+    "ar": "Arabic", "hi": "Hindi", "id": "Indonesian", "ms": "Malay", "th": "Thai", "vi": "Vietnamese",
+    "tr": "Turkish", "pl": "Polish", "he": "Hebrew", "bn": "Bengali", "ta": "Tamil", "te": "Telugu",
+    "kn": "Kannada", "mr": "Marathi", "tl": "Tagalog",
+}
+
+
+_KW_BAD = re.compile(r"[$\\^_{}<>|`~\[\]]")   # LaTeX / markup — not speakable, and rejected as vocabulary
+
+
+def _meta_keywords(raw):
+    """Dedupe/cap the glossary terms sent as Meta `keywords`. Math-notation entries from the
+    agent's correction rules (e.g. `$K_e$`) are dropped — they are spellings, not spoken words."""
+    out, seen = [], set()
+    for k in raw or []:
+        k = str(k).strip()[:60]
+        if not k or _KW_BAD.search(k) or len(k) < 2:
+            continue
+        if k.lower() not in seen:
+            seen.add(k.lower())
+            out.append(k)
+        if len(out) >= META_MAX_KEYWORDS:
+            break
+    return out
+
+
+def _meta_request(language, keywords, encoding):
+    req = {"model": META_MODEL, "mode": "ENDPOINTING", "partialMode": "CUMULATIVE",
+           "emitAudioProgress": False, "audioEncoding": encoding}
+    kw = _meta_keywords(keywords)
+    if kw:
+        req["keywords"] = kw
+    name = META_LANG_NAMES.get(_lang(language) or "")
+    if name:
+        req["languageBias"] = [name]
+    return req
+
+
+def _meta_transcribe_file(audio, language, keywords, api_key, progress=None):
+    """Whole-file transcription via POST /v1/asr/transcribe. The endpoint caps a request at
+    10 min / 32 MB, so long audio is cut at quiet points into ≤5-min WAV chunks."""
+    import requests
+
+    n = len(audio)
+    pts = _chunk_points(audio)
+    out = []
+    for i in range(len(pts) - 1):
+        seg = audio[pts[i]:pts[i + 1]]
+        off = pts[i] / SAMPLE_RATE
+        r = requests.post(
+            META_HTTP_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+            files={
+                "request": (None, json.dumps(_meta_request(language, keywords, "WAV")), "application/json"),
+                "audio": ("audio.wav", _wav_bytes(seg), "audio/wav"),
+            },
+            timeout=600,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"Meta {r.status_code}: {r.text[:200]}")
+        body = r.json()
+        turns = body.get("turns") or []
+        if turns:
+            for t in turns:
+                txt = _clean(t.get("transcript") or "")
+                if txt:
+                    out.append({"tStart": off + float(t.get("startMs", 0)) / 1000,
+                                "tEnd": off + float(t.get("endMs", 0)) / 1000, "text": txt})
+        else:
+            txt = _clean(body.get("transcript") or "")
+            if txt:
+                out.append({"tStart": off, "tEnd": off + len(seg) / SAMPLE_RATE, "text": txt})
+        if progress:
+            progress(min(99.0, pts[i + 1] / n * 100.0))
+    return out
+
+
 async def handle(ws, *_):
     cfg = {
         "model": "turbo",
@@ -235,6 +371,8 @@ async def handle(ws, *_):
         "oaiModel": "gpt-4o-transcribe",
         "realtimePreview": False,  # overlay: live preview via Realtime, finals stay on the chosen engine
         "localPreview": True,  # local (base-model) live preview; off → finals get 100% of the GPU
+        "metaKey": "",         # Meta Model API key (cfg["model"] == "meta" → Muse Voice Transcribe)
+        "keywords": [],        # glossary terms → Meta `keywords` vocabulary biasing
     }
     loop = asyncio.get_event_loop()
     # OpenAI Realtime session state. When connected, Realtime produces BOTH the live
@@ -243,7 +381,22 @@ async def handle(ws, *_):
     # "closing" distinguishes a session WE tore down (toggle-off / stop) from one OpenAI
     # dropped on its own (Realtime transcription is capped ~30 min) — only the latter
     # triggers the local-Whisper fallback below.
-    oai = {"ws": None, "task": None, "clock": 0, "start": 0.0, "acc": "", "closing": False}
+    oai = {"ws": None, "task": None, "clock": 0, "start": 0.0, "acc": "", "closing": False,
+           "reported": 0, "batch_sec": 0.0, "batch_reported": 0.0}
+
+    async def oai_report_usage(force=False):
+        """Usage of the OpenAI cloud paths (realtime stream + batch chunks) for the live cost display."""
+        try:
+            if oai["clock"] and (force or oai["clock"] - oai["reported"] >= SAMPLE_RATE):
+                oai["reported"] = oai["clock"]
+                await ws.send(json.dumps({"type": "usage", "engine": "openai-realtime", "audioSec": oai["clock"] / SAMPLE_RATE,
+                                          "usdPerHour": OPENAI_USD_PER_HOUR, "estimate": True}))
+            if oai["batch_sec"] and (force or oai["batch_sec"] - oai["batch_reported"] >= 1.0):
+                oai["batch_reported"] = oai["batch_sec"]
+                await ws.send(json.dumps({"type": "usage", "engine": "openai-transcribe", "audioSec": oai["batch_sec"],
+                                          "usdPerHour": OPENAI_USD_PER_HOUR, "estimate": True}))
+        except Exception:  # noqa: BLE001
+            pass
 
     async def connect_realtime():
         # GA Realtime API (no beta header; nested session.audio.input shape)
@@ -261,7 +414,8 @@ async def handle(ws, *_):
                     "input": {
                         "format": {"type": "audio/pcm", "rate": 24000},
                         # gpt-realtime-whisper streams continuously and rejects turn_detection
-                        "transcription": {"model": cfg.get("oaiModel") or "gpt-realtime-whisper", "language": cfg["language"] or "ko"},
+                        "transcription": {"model": cfg.get("oaiModel") or "gpt-realtime-whisper",
+                                          **({"language": cfg["language"]} if _lang(cfg["language"]) else {})},
                     }
                 },
             },
@@ -363,6 +517,191 @@ async def handle(ws, *_):
     # the "처음 1분 아무것도 안 뜸" bug). Previews are skipped until it's ready; finals (turbo,
     # loaded at config) run immediately regardless.
     pmodel = {"ready": False}
+    # WHISPER LIVE (cfg["model"] == "live"): the streaming engine (python/lightning.py) owns VAD +
+    # volatile previews + finals for the whole session — the local-VAD/consumer path above is
+    # bypassed while it's active (same precedence as the OpenAI Realtime takeover).
+    live = {"session": None}
+    live_out: asyncio.Queue = asyncio.Queue()
+
+    def live_emit(m):
+        loop.call_soon_threadsafe(live_out.put_nowait, m)
+
+    async def live_pump():
+        while True:
+            m = await live_out.get()
+            if m is None:
+                return
+            try:
+                await ws.send(json.dumps(m))
+            except Exception:  # noqa: BLE001
+                return
+
+    live_pump_task = asyncio.create_task(live_pump())
+
+    # META realtime state. One relay task per Meta session; `gen` tells a finishing relay whether it
+    # is still the active session (a rotated-away session must not trigger the fallback logic).
+    # base = stream clock (seconds of audio fed) when the session opened; Meta's audioProcessedMs is
+    # relative to the session, so absolute timestamps = base + ms/1000.
+    meta = {"ws": None, "task": None, "connecting": None, "gen": 0, "base": 0.0, "opened_at": 0.0,
+            "fails": 0, "next_try": 0.0, "closing": False, "pending": bytearray(),
+            "sent": 0, "reported": 0}   # samples handed to Meta (billing basis) / last usage report
+
+    async def meta_report_usage(force=False):
+        """Tell the client how much audio Meta has been sent (every ≥1s of audio) for the live cost display."""
+        if force or meta["sent"] - meta["reported"] >= SAMPLE_RATE:
+            meta["reported"] = meta["sent"]
+            try:
+                await ws.send(json.dumps({"type": "usage", "engine": "meta", "audioSec": meta["sent"] / SAMPLE_RATE,
+                                          "usdPerHour": META_USD_PER_HOUR}))
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def meta_connect():
+        conn = await websockets.connect(META_RT_URL, max_size=None, ping_interval=20, open_timeout=30)
+        req = _meta_request(cfg["language"], [] if meta.get("no_keywords") else cfg.get("keywords"), "PCM_16KHZ")
+        if meta.get("no_langbias"):
+            req.pop("languageBias", None)
+        hs = {"authorization": {"accessToken": f"Bearer {cfg['metaKey']}"}, **req}
+        print(f"[stt] meta handshake: keywords={len(req.get('keywords', []))} languageBias={req.get('languageBias')} "
+              f"mode={req['mode']}", flush=True)
+        await conn.send(json.dumps(hs))
+        ack = json.loads(await asyncio.wait_for(conn.recv(), 20))
+        if "sessionId" not in ack:
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise RuntimeError(ack.get("message") or str(ack)[:200])
+        return conn
+
+    async def meta_relay(conn, gen, base):
+        turns = {}
+        try:
+            async for raw in conn:
+                if isinstance(raw, bytes):
+                    continue
+                ev = json.loads(raw)
+                t = ev.get("type")
+                if t in ("speechStart", "transcript", "speechComplete"):
+                    meta["fails"] = 0  # the session is doing real work → reset the reconnect budget
+                if t not in ("transcript", "audioProgress"):
+                    print(f"[stt] meta event: {raw[:300]}", flush=True)
+                if t == "speechStart":
+                    turns[ev.get("turnId")] = float(ev.get("audioProcessedMs", 0))
+                elif t == "transcript":
+                    if not ev.get("final"):
+                        await ws.send(json.dumps({"type": "partial", "text": ev.get("transcript") or ""}))
+                elif t == "speechComplete":
+                    text = _clean(ev.get("transcript") or "")
+                    end_ms = float(ev.get("audioProcessedMs", 0))
+                    start_ms = turns.pop(ev.get("turnId"), max(0.0, end_ms - 1000))
+                    if text:
+                        await ws.send(json.dumps({"type": "segment", "tStart": base + start_ms / 1000,
+                                                  "tEnd": base + max(end_ms, start_ms) / 1000, "text": text, "final": True}))
+                elif t == "error":
+                    await ws.send(json.dumps({"type": "error", "message": f"Meta 전사 오류: {ev.get('message')}"}))
+        except Exception as e:  # noqa: BLE001
+            print(f"[stt] meta relay ended: {e!r}", flush=True)
+        if meta["gen"] != gen:
+            return  # rotated away — a newer session owns the stream
+        meta["ws"], meta["task"] = None, None
+        if meta["closing"]:
+            return
+        # dropped by the server → decide by close code (https://dev.meta.ai/docs/api-reference/voice/realtime):
+        #   1008 invalid request / bad key / pacing policy → retrying the same request fails again → fall back now
+        #   1013 rate limited → back off longer; 1011 max-session / backend → reconnect; idle close after a
+        #   pause → lazy reconnect on the next audio frame. After repeated failures fall back to local Whisper.
+        code = getattr(conn, "close_code", None)
+        reason = str(getattr(conn, "close_reason", "") or "")
+        alive = time.time() - meta.get("opened_wall", time.time())
+        print(f"[stt] meta session closed code={code} reason={reason!r} after {alive:.1f}s", flush=True)
+        if code == 1008 and "unauthorized" in reason.lower():
+            await meta_fallback("Meta가 API 키를 거부했습니다(Unauthorized) — 로컬 Whisper(turbo)로 전환했습니다. 키를 확인하세요.")
+            return
+        if code == 1008 and alive < 10:
+            # rejected right after the handshake → the REQUEST is the problem, not pacing. Narrow it
+            # down by retrying without the optional parts (keywords → languageBias) before giving up.
+            if not meta.get("no_keywords") and cfg.get("keywords"):
+                meta["no_keywords"] = True
+                meta["next_try"] = time.time()
+                await ws.send(json.dumps({"type": "error", "message": "Meta가 용어 사전(keywords)을 거부해 용어 사전 없이 다시 연결합니다."}))
+                return
+            if not meta.get("no_langbias") and _lang(cfg["language"]):
+                meta["no_langbias"] = True
+                meta["next_try"] = time.time()
+                await ws.send(json.dumps({"type": "error", "message": "Meta가 언어 힌트(languageBias)를 거부해 언어 자동 감지로 다시 연결합니다."}))
+                return
+            await meta_fallback(f"Meta가 요청을 거부했습니다({reason or '1008'}) — 로컬 Whisper(turbo)로 전환했습니다.")
+            return
+        # 1008 later in a session = streaming-policy (paused input / backlog) → just reconnect
+        meta["fails"] += 1
+        meta["next_try"] = time.time() + (min(60.0, 5.0 * meta["fails"]) if code == 1013 else min(20.0, 2.0 ** meta["fails"]))
+        if meta["fails"] >= 4:
+            await meta_fallback("Meta 실시간 연결이 반복 실패해 로컬 Whisper(turbo)로 전환했습니다 — 전사는 계속됩니다.")
+
+    async def meta_fallback(message):
+        nonlocal last_partial_off
+        cfg["model"] = "turbo"
+        last_partial_off = sample_offset
+        try:
+            await loop.run_in_executor(None, get_model, "turbo")
+            await ws.send(json.dumps({"type": "error", "message": message}))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def meta_open():
+        """Open a new Meta session at the current stream clock (initial connect or 55-min rotation)."""
+        conn = await meta_connect()
+        gen = meta["gen"] + 1
+        now = sample_offset / SAMPLE_RATE
+        meta.update(ws=conn, gen=gen, base=now, opened_at=now, opened_wall=time.time())
+        meta["task"] = asyncio.create_task(meta_relay(conn, gen, now))
+        if meta["pending"]:
+            try:
+                await conn.send(bytes(meta["pending"]))
+                meta["sent"] += len(meta["pending"]) // 2
+            except Exception:  # noqa: BLE001
+                pass
+            meta["pending"] = bytearray()
+
+    async def meta_open_bg():
+        try:
+            await meta_open()
+        except Exception as e:  # noqa: BLE001
+            meta["fails"] += 1
+            meta["next_try"] = time.time() + min(20.0, 2.0 ** meta["fails"])
+            print(f"[stt] meta connect failed: {e!r}", flush=True)
+            if meta["fails"] >= 4:
+                await meta_fallback(f"Meta 연결 실패({str(e)[:80]}) — 로컬 Whisper(turbo)로 전환했습니다.")
+        finally:
+            meta["connecting"] = None
+
+    async def meta_close(graceful=True):
+        meta["closing"] = True
+        if meta["connecting"]:
+            meta["connecting"].cancel()
+        conn, task = meta["ws"], meta["task"]
+        if conn is not None:
+            try:
+                if graceful:
+                    await conn.send(json.dumps({"type": "endStream"}))
+                    if task:
+                        await asyncio.wait_for(task, 25)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        meta["ws"], meta["task"] = None, None
+
+    def start_live():
+        from lightning import LightningSession
+        model = get_model("turbo")
+        return LightningSession(
+            model, cfg["language"], cfg["silenceSec"], live_emit,
+            log=lambda m: print(f"[stt] {m}", flush=True),
+        )
 
     async def _do_final(item):
         _, audio, t0, t1 = item
@@ -372,6 +711,8 @@ async def handle(ws, *_):
                 text = await loop.run_in_executor(
                     None, _openai_transcribe, audio, cfg["language"], cfg["apiKey"], cfg.get("oaiModel")
                 )
+                oai["batch_sec"] += len(audio) / SAMPLE_RATE
+                await oai_report_usage()
             else:
                 text = await loop.run_in_executor(
                     None, _transcribe_array, cfg["model"], audio, cfg["language"], cfg["initialPrompt"]
@@ -448,7 +789,7 @@ async def handle(ws, *_):
                     cfg.update(
                         {
                             k: msg.get(k, cfg.get(k))
-                            for k in ("model", "language", "initialPrompt", "engine", "apiKey", "oaiModel", "realtimePreview", "localPreview")
+                            for k in ("model", "language", "initialPrompt", "engine", "apiKey", "oaiModel", "realtimePreview", "localPreview", "metaKey", "keywords")
                         }
                     )
                     # clamp user-adjustable VAD params to safe bounds
@@ -476,12 +817,34 @@ async def handle(ws, *_):
                             if oai["task"]:
                                 oai["task"].cancel()
                             oai["ws"], oai["task"] = None, None
-                        if cfg["engine"] != "openai-realtime":
+                        if cfg["model"] == "meta" and not cfg.get("metaKey"):
+                            await ws.send(json.dumps({"type": "error",
+                                                      "message": "Meta API 키가 없어 로컬 Whisper(turbo)로 전사합니다 — 녹음 옵션(⚙)에서 키를 저장하세요."}))
+                            cfg["model"] = "turbo"
+                        want_meta = cfg["model"] == "meta" and cfg["engine"] != "openai-realtime" and not want_rt
+                        if want_meta and meta["ws"] is None and meta["connecting"] is None:
+                            meta["closing"] = False
+                            meta["fails"] = 0
+                            try:
+                                await meta_open()  # connect up front so the first utterance streams immediately
+                            except Exception as e:  # noqa: BLE001
+                                await meta_fallback(f"Meta 연결 실패({str(e)[:80]}) — 로컬 Whisper(turbo)로 전사합니다.")
+                        elif not want_meta and (meta["ws"] is not None or meta["connecting"] is not None):
+                            await meta_close(graceful=False)
+                        want_live = cfg["model"] == "live" and ENGINE == "mlx" and cfg["engine"] != "openai-realtime"
+                        if cfg["model"] == "live" and ENGINE != "mlx":
+                            await ws.send(json.dumps({"type": "error",
+                                                      "message": "Whisper Live는 Apple Silicon(MLX)에서만 동작합니다 — turbo 모델로 전사합니다."}))
+                            cfg["model"] = "turbo"
+                        if want_live:
+                            if live["session"] is None:
+                                live["session"] = await loop.run_in_executor(None, start_live)
+                        elif cfg["engine"] != "openai-realtime" and cfg["model"] != "meta":
                             # local/cloud-batch finals use the local-VAD path → load the model (cached)
                             await loop.run_in_executor(None, get_model, cfg["model"])
                             # warm the small preview model in the BACKGROUND (do NOT await): its
                             # first-time download must never block the consumer/finals.
-                            if not pmodel["ready"]:
+                            if not pmodel["ready"] and cfg.get("localPreview", True):
                                 async def _warm_preview():
                                     try:
                                         await loop.run_in_executor(None, get_model, PREVIEW_MODEL)
@@ -493,7 +856,10 @@ async def handle(ws, *_):
                         await ws.send(json.dumps({"type": "error", "message": f"엔진 초기화 실패: {e}"}))
                     await ws.send(json.dumps({"type": "status", "state": "ready"}))
                 elif mt == "flush":
-                    enqueue()
+                    if live["session"] is not None:
+                        live["session"].flush()
+                    else:
+                        enqueue()
                 elif mt == "stop":
                     if oai["ws"] is not None:
                         # flush the last in-progress utterance as a final segment
@@ -513,15 +879,39 @@ async def handle(ws, *_):
                             await oai["ws"].close()
                         except Exception:  # noqa: BLE001
                             pass
+                        await oai_report_usage(force=True)
+                        await ws.send(json.dumps({"type": "stopped"}))
+                    elif cfg["model"] == "meta" and (meta["ws"] is not None or meta["connecting"] is not None):
+                        await ws.send(json.dumps({"type": "finalizing", "remaining": 1}))
+                        await meta_close(graceful=True)  # endStream → server flushes pending turns → 1000
+                        await meta_report_usage(force=True)
+                        await ws.send(json.dumps({"type": "stopped"}))
+                    elif live["session"] is not None:
+                        sess = live["session"]
+                        fut = loop.run_in_executor(None, sess.finish)
+                        while not fut.done():
+                            await ws.send(json.dumps({"type": "finalizing", "remaining": sess.backlog()}))
+                            await asyncio.wait([fut], timeout=0.5)
+                        await fut
+                        st = sess.stats
+                        n = max(1, st["steps"])
+                        print(f"[stt] live session: steps={st['steps']} holds={st['holds']} finals={st['finals']} "
+                              f"enc={st['enc_ms'] / n:.0f}ms dec={st['dec_ms'] / n:.0f}ms", flush=True)
+                        live["session"] = None
                         await ws.send(json.dumps({"type": "stopped"}))
                     else:
                         enqueue()
                         fin["stopping"] = True
                         await ws.send(json.dumps({"type": "finalizing", "remaining": utt_queue.qsize()}))
                         await utt_queue.join()  # wait for all queued utterances to finish
+                        await oai_report_usage(force=True)
                         await ws.send(json.dumps({"type": "stopped"}))
-                elif mt == "refine":
+                elif mt in ("refine", "transcribe_file"):
                     await do_refine(ws, msg, loop)
+                elif mt == "embed":
+                    # sentence embeddings for 교안 page tracking (separate socket from the audio
+                    # stream; runs in the executor so it never blocks transcription)
+                    asyncio.ensure_future(do_embed(ws, msg, loop))
                 continue
 
             # binary PCM frame
@@ -539,6 +929,39 @@ async def handle(ws, *_):
                     )
                 except Exception:  # noqa: BLE001
                     pass
+                await oai_report_usage()
+                continue
+            if cfg["model"] == "meta" and cfg.get("metaKey"):
+                sample_offset += n
+                pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+                if meta["ws"] is None:
+                    # (re)connect lazily — never block the audio loop; buffer ≤4s meanwhile
+                    if meta["connecting"] is None and not meta["closing"] and time.time() >= meta["next_try"]:
+                        meta["connecting"] = asyncio.create_task(meta_open_bg())
+                    meta["pending"] += pcm
+                    del meta["pending"][:-4 * SAMPLE_RATE * 2]
+                    continue
+                if sample_offset / SAMPLE_RATE - meta["opened_at"] >= META_ROTATE_SEC and meta["connecting"] is None:
+                    # rotate before the 60-min cap: half-close the old session (its relay keeps
+                    # flushing pending turns) and open a fresh one on the same stream clock
+                    old = meta["ws"]
+                    meta["ws"] = None
+                    try:
+                        await old.send(json.dumps({"type": "endStream"}))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    meta["pending"] += pcm
+                    meta["connecting"] = asyncio.create_task(meta_open_bg())
+                    continue
+                try:
+                    await meta["ws"].send(pcm)
+                    meta["sent"] += n
+                except Exception:  # noqa: BLE001
+                    pass
+                await meta_report_usage()
+                continue
+            if live["session"] is not None:
+                live["session"].feed(arr)
                 continue
             rms = float(np.sqrt(np.mean(arr * arr)))
             if rms > RMS_THRESH:
@@ -596,6 +1019,13 @@ async def handle(ws, *_):
                 pass
             if oai["task"]:
                 oai["task"].cancel()
+        if meta["ws"] is not None or meta["connecting"] is not None:
+            await meta_close(graceful=False)
+        if live["session"] is not None:
+            live["session"].finished = True  # stepper exits after its current step
+            live["session"] = None
+        live_out.put_nowait(None)
+        live_pump_task.cancel()
         utt_queue.put_nowait(None)
         try:
             await asyncio.wait_for(consumer_task, timeout=5)
@@ -603,46 +1033,141 @@ async def handle(ws, *_):
             consumer_task.cancel()
 
 
+def _read_wav(path):
+    """16-bit PCM WAV → float32 (any rate/channels; resampled to 16k mono if needed)."""
+    with wave.open(path, "rb") as w:
+        sr, ch, sw = w.getframerate(), w.getnchannels(), w.getsampwidth()
+        raw = w.readframes(w.getnframes())
+    if sw != 2:
+        raise ValueError(f"unsupported wav sample width {sw}")
+    pcm = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
+    if ch > 1:
+        pcm = pcm.reshape(-1, ch).mean(axis=1)
+    if sr != SAMPLE_RATE:
+        pcm = _resample(pcm, sr, SAMPLE_RATE)
+    return pcm.astype(np.float32)
+
+
+def _load_audio_file(path):
+    if path.lower().endswith(".wav"):
+        try:
+            return _read_wav(path)
+        except Exception:  # noqa: BLE001
+            pass
+    return _decode_file(path)
+
+
+def _chunk_points(audio, chunk_sec=300.0, search_sec=3.0):
+    """Cut a long file into ≈chunk_sec pieces at the quietest 50ms frame near each boundary, so a
+    word is never split. The tail (<30s) merges into the last chunk."""
+    n = len(audio)
+    step = int(chunk_sec * SAMPLE_RATE)
+    frame = int(0.05 * SAMPLE_RATE)
+    pts = [0]
+    pos = step
+    while pos < n - int(30 * SAMPLE_RATE):
+        lo = max(pts[-1] + int(60 * SAMPLE_RATE), pos - int(search_sec * SAMPLE_RATE))
+        hi = min(n, pos + int(search_sec * SAMPLE_RATE))
+        win = audio[lo:hi]
+        k = len(win) // frame
+        if k > 0:
+            energy = (win[: k * frame].reshape(k, frame) ** 2).mean(axis=1)
+            cut = lo + int(np.argmin(energy)) * frame + frame // 2
+        else:
+            cut = pos
+        pts.append(cut)
+        pos = cut + step
+    pts.append(n)
+    return pts
+
+
+async def do_embed(ws, msg, loop):
+    """{"type":"embed","id","kind":"query"|"passage","texts":[…]} → embed_done | embed_error.
+    Any failure (download, load, inference) is reported and the renderer falls back to lexical."""
+    rid = msg.get("id")
+    texts = [str(t) for t in (msg.get("texts") or [])]
+    kind = "passage" if msg.get("kind") == "passage" else "query"
+    try:
+        import embedder
+        vectors = await loop.run_in_executor(None, embedder.embed, texts, kind)
+        await ws.send(json.dumps({"type": "embed_done", "id": rid, "model": embedder.MODEL_ID, "dims": embedder.DIMS, "vectors": vectors}))
+    except Exception as e:  # noqa: BLE001
+        try:
+            await ws.send(json.dumps({"type": "embed_error", "id": rid, "message": str(e)}))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 async def do_refine(ws, msg, loop):
+    """Whole-file transcription (imported recordings / refine). Streams refine_progress, then
+    refine_done with sentence-level segments carrying absolute timestamps."""
     q: asyncio.Queue = asyncio.Queue()
 
     def run():
         try:
-            model_name = msg.get("model", "large-v3")
-            language = msg.get("language") or None
+            model_name = msg.get("model", "turbo")
+            if model_name == "live":
+                model_name = "turbo"  # the streaming engine has no batch mode — same weights anyway
+            language = _lang(msg.get("language"))
             ip = msg.get("initialPrompt") or None
             out = []
-            if ENGINE == "mlx":
-                import mlx_whisper
-                audio = _decode_file(msg["wavPath"])  # PyAV decode (no system ffmpeg)
-                loop.call_soon_threadsafe(q.put_nowait, {"type": "refine_progress", "percent": 20.0})
-                r = mlx_whisper.transcribe(
-                    audio,
-                    path_or_hf_repo=MLX_REPO.get(model_name, model_name),
-                    language=language,
-                    initial_prompt=ip,
-                    condition_on_previous_text=True,
-                    verbose=None,
+            path = msg.get("wavPath") or msg.get("path")
+            if model_name == "meta":
+                if not msg.get("metaKey"):
+                    raise RuntimeError("Meta API 키가 없습니다 — 녹음 옵션(⚙)에서 키를 저장하세요")
+                audio = _load_audio_file(path)
+                if len(audio) == 0:
+                    raise RuntimeError("오디오가 비어 있습니다")
+                loop.call_soon_threadsafe(q.put_nowait, {"type": "refine_progress", "percent": 1.0})
+                out = _meta_transcribe_file(
+                    audio, msg.get("language"), msg.get("keywords"), msg["metaKey"],
+                    progress=lambda pct: loop.call_soon_threadsafe(q.put_nowait, {"type": "refine_progress", "percent": pct}),
                 )
-                for s in r.get("segments", []):
-                    txt = _clean(s["text"])
-                    if txt:
-                        out.append({"tStart": s["start"], "tEnd": s["end"], "text": txt})
+            elif ENGINE == "mlx":
+                import mlx_whisper
+                audio = _load_audio_file(path)
+                n = len(audio)
+                if n == 0:
+                    raise RuntimeError("오디오가 비어 있습니다")
+                loop.call_soon_threadsafe(q.put_nowait, {"type": "refine_progress", "percent": 1.0})
+                pts = _chunk_points(audio)
+                repo = MLX_REPO.get(model_name, model_name)
+                for i in range(len(pts) - 1):
+                    seg = audio[pts[i]:pts[i + 1]]
+                    off = pts[i] / SAMPLE_RATE
+                    r = mlx_whisper.transcribe(
+                        seg,
+                        path_or_hf_repo=repo,
+                        language=language,
+                        initial_prompt=ip,
+                        condition_on_previous_text=True,
+                        verbose=None,
+                    )
+                    for sg in r.get("segments", []):
+                        txt = _clean(sg["text"])
+                        if txt:
+                            out.append({"tStart": off + float(sg["start"]), "tEnd": off + float(sg["end"]), "text": txt})
+                    pct = min(99.0, pts[i + 1] / n * 100.0)
+                    loop.call_soon_threadsafe(q.put_nowait, {"type": "refine_progress", "percent": pct})
             else:
                 model = _ct2_model(model_name)
                 segments, info = model.transcribe(
-                    msg["wavPath"], language=language, initial_prompt=ip,
+                    path, language=language, initial_prompt=ip,
                     beam_size=5, vad_filter=True, condition_on_previous_text=True,
                 )
                 dur = info.duration or 0
-                for s in segments:
-                    txt = _clean(s.text)
+                for sg in segments:
+                    txt = _clean(sg.text)
                     if txt:
-                        out.append({"tStart": s.start, "tEnd": s.end, "text": txt})
-                    pct = min(99.0, (s.end / dur * 100.0) if dur else 0.0)
+                        out.append({"tStart": sg.start, "tEnd": sg.end, "text": txt})
+                    pct = min(99.0, (sg.end / dur * 100.0) if dur else 0.0)
                     loop.call_soon_threadsafe(q.put_nowait, {"type": "refine_progress", "percent": pct})
-            loop.call_soon_threadsafe(q.put_nowait, {"type": "refine_done", "segments": out})
+            done = {"type": "refine_done", "segments": out}
+            if model_name == "meta":
+                done["usage"] = {"engine": "meta", "audioSec": len(audio) / SAMPLE_RATE, "usdPerHour": META_USD_PER_HOUR}
+            loop.call_soon_threadsafe(q.put_nowait, done)
         except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
             loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "message": str(e)})
 
     fut = loop.run_in_executor(None, run)

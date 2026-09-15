@@ -54,7 +54,9 @@ const KIND_LABEL: Record<StudioKind, string> = {
   table: '테이블',
   mnemonic: '암기노트',
   feynman: '파인만 복습',
-  exam_radar: '시험 레이더'
+  exam_radar: '시험 레이더',
+  tutor: 'AI 튜터',
+  live_tutor: '실시간 튜터'
 }
 
 const clamp100 = (n: unknown): number => Math.max(0, Math.min(100, Math.round(Number(n)) || 0))

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { FolderOpen, X, Pencil, RotateCcw, AlertTriangle, Check, Keyboard, ChevronRight } from 'lucide-react'
+import { FolderOpen, X, Pencil, RotateCcw, AlertTriangle, Check, Keyboard, ChevronRight, Sparkles } from 'lucide-react'
 import { useStore } from '../store/useStore'
 import { HelpTip } from './HelpTip'
 import { ACCENT_THEMES } from '../lib/theme'
 import { comboFromEvent, formatShortcut } from '../lib/shortcut'
+import { NotionSettings } from './NotionSettings'
 
 /** Click → press a key combo to rebind a shortcut. Captures before app-level shortcuts fire. */
 function ShortcutCapture({ value, onChange }: { value: string; onChange: (s: string) => void }): JSX.Element {
@@ -113,7 +114,7 @@ function VadSlider({
 }
 
 export function SettingsModal(): JSX.Element | null {
-  const { settingsOpen, setSettingsOpen, accentTheme, setAccentTheme, noteLineSpacing, setNoteLineSpacing, spotlightShortcut, setSpotlightShortcut } =
+  const { settingsOpen, setSettingsOpen, accentTheme, setAccentTheme, noteLineSpacing, setNoteLineSpacing, spotlightShortcut, setSpotlightShortcut, openWhatsNew, appVersion } =
     useStore()
   const [dir, setDir] = useState('')
   const [silenceSec, setSilenceSec] = useState(1.3)
@@ -144,9 +145,21 @@ export function SettingsModal(): JSX.Element | null {
       <div className="dictly-modal-in max-h-[80vh] w-[560px] overflow-y-auto rounded-2xl bg-white shadow-2xl" onMouseDown={(e) => e.stopPropagation()}>
         <div className="sticky top-0 flex items-center justify-between border-b border-black/5 bg-white px-5 py-3">
           <span className="text-[14px] font-semibold">설정</span>
-          <button onClick={() => setSettingsOpen(false)} className="rounded p-1 text-subtle hover:bg-black/5">
-            <X size={18} />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => {
+                setSettingsOpen(false)
+                openWhatsNew()
+              }}
+              className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11.5px] text-subtle hover:bg-black/5 hover:text-ink"
+              title="이 버전의 새 기능 소개를 다시 봐요"
+            >
+              <Sparkles size={13} /> v{appVersion || '…'} 새 기능
+            </button>
+            <button onClick={() => setSettingsOpen(false)} className="rounded p-1 text-subtle hover:bg-black/5">
+              <X size={18} />
+            </button>
+          </div>
         </div>
 
         <div className="space-y-5 px-5 py-4">
@@ -233,6 +246,9 @@ export function SettingsModal(): JSX.Element | null {
               </button>
             </div>
           </div>
+
+          {/* Notion export destination */}
+          <NotionSettings />
 
           {/* VAD tuning — advanced, collapsed by default */}
           <div className="border-t border-black/5 pt-4">

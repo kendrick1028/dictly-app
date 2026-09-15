@@ -1,7 +1,7 @@
 {
   "name": "dictly",
-  "version": "0.4.4",
-  "description": "로컬 STT 음성인식 기록 앱 (Dictly)",
+  "version": "0.6.1",
+  "description": "\ub85c\uceec STT \uc74c\uc131\uc778\uc2dd \uae30\ub85d \uc571 (Dictly)",
   "main": "./out/main/index.js",
   "author": "Dictly",
   "license": "MIT",
@@ -34,6 +34,7 @@
     "@tiptap/starter-kit": "^2.27.2",
     "@tiptap/suggestion": "^2.27.2",
     "better-sqlite3": "^11.8.1",
+    "electron-updater": "^6.8.9",
     "ffmpeg-static": "^5.2.0",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",

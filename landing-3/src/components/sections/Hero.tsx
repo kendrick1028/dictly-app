@@ -1,10 +1,12 @@
 import { motion } from 'framer-motion'
 import { Download, ArrowRight } from 'lucide-react'
-import { DMG_URL, stats } from '@/content'
+import { stats } from '@/content'
+import { useLatestRelease } from '@/lib/release'
 import { VideoFrame } from '@/components/VideoFrame'
 import { goToSetup } from '@/lib/utils'
 
 export function Hero() {
+  const { version, primaryUrl, primaryOs, exeUrl, dmgUrl } = useLatestRelease()
   return (
     <section id="top" className="relative mx-auto max-w-content px-5 pb-10 pt-28 sm:px-8 sm:pt-36">
       <div className="mx-auto max-w-3xl text-center">
@@ -14,7 +16,7 @@ export function Hero() {
           transition={{ duration: 0.5 }}
           className="mb-5 inline-flex items-center gap-2 rounded-full border border-line px-3 py-1 text-xs font-medium text-sub"
         >
-          macOS · Apple Silicon · 무료
+          macOS · Windows · 무료
         </motion.p>
         <motion.h1
           initial={{ opacity: 0, y: 16 }}
@@ -42,12 +44,12 @@ export function Hero() {
           className="mt-8 flex flex-wrap items-center justify-center gap-3"
         >
           <a
-            href={DMG_URL}
+            href={primaryUrl}
             onClick={goToSetup}
             className="inline-flex items-center gap-2 rounded-full bg-ink px-6 py-3 text-[15px] font-semibold text-white transition-transform hover:-translate-y-0.5"
           >
             <Download className="h-4 w-4" />
-            무료 다운로드
+            {primaryOs === 'windows' ? 'Windows용 다운로드' : 'macOS용 다운로드'}
           </a>
           <a
             href="#features"
@@ -57,7 +59,13 @@ export function Hero() {
             <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-0.5" />
           </a>
         </motion.div>
-        <p className="mt-4 text-[13px] text-faint">Apple Silicon · macOS 14+ · 약 500MB · v0.4.0</p>
+        <p className="mt-4 text-[13px] text-faint">
+          {primaryOs === 'windows' ? 'Windows 10/11 · 64비트' : 'Apple Silicon · macOS 14+'} · 약 500MB · {version}
+          {' · '}
+          <a href={primaryOs === 'windows' ? dmgUrl : exeUrl ?? dmgUrl} onClick={goToSetup} className="underline underline-offset-2 hover:text-ink">
+            {primaryOs === 'windows' ? 'macOS 버전' : exeUrl ? 'Windows 버전' : 'Windows 버전 준비 중'}
+          </a>
+        </p>
       </div>
 
       {/* hero video — subtle scale-in for an altalt-style focus */}

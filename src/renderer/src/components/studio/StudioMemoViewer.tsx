@@ -2,7 +2,7 @@
 // item actions (⋮ · 닫기) live in the panel header — exported here as ViewerHeaderCrumb/Actions so
 // the Studio panel can place them on its single header row (no duplicate "스튜디오" label).
 import { useEffect, useRef, useState } from 'react'
-import { ChevronRight, Code2, Copy, FileDown, Image, Loader2, MoreVertical, Trash2, Volume2 } from 'lucide-react'
+import { ChevronRight, Code2, Copy, FileDown, Image, Loader2, MoreVertical, Send, Trash2, Volume2 } from 'lucide-react'
 
 /** "┘┌" corners-in glyph (NotebookLM-style close/collapse) */
 function CornersIn({ size = 14 }: { size?: number }): JSX.Element {
@@ -16,6 +16,7 @@ function CornersIn({ size = 14 }: { size?: number }): JSX.Element {
 import { useStore } from '../../store/useStore'
 import { stripCiteTokens } from '../../lib/citations'
 import { downloadStudioImage, downloadStudioPdf, downloadStudioHtml } from '../../lib/studioExport'
+import { exportStudioToNotion } from '../../lib/notionExport'
 import type { PageSize } from '../../lib/studioHtml'
 import { copyText } from '../../lib/clipboard'
 import { studioKindLabel } from '../../lib/studioParse'
@@ -29,6 +30,8 @@ import { TablesView } from './views/TablesView'
 import { MnemonicView } from './views/MnemonicView'
 import { FeynmanView } from './views/FeynmanView'
 import { ExamRadarView } from './views/ExamRadarView'
+import { TutorView } from './views/TutorView'
+import { LiveTutorView } from './views/LiveTutorView'
 import type { StudioItem, SummaryContent } from '../../../../shared/types'
 
 function itemPlainText(item: StudioItem): string {
@@ -134,6 +137,12 @@ export function ViewerHeaderActions({ item }: { item: StudioItem }): JSX.Element
             <ItemBtn icon={<Image size={12} />} label="이미지로 다운로드" onClick={() => void runExport(downloadStudioImage, '이미지 저장')} />
             <div className="my-1 h-px bg-black/5" />
             <ItemBtn
+              icon={<Send size={12} />}
+              label="Notion으로 내보내기"
+              onClick={() => void runExport(async (it) => void (await exportStudioToNotion(it)), 'Notion 내보내기')}
+            />
+            <div className="my-1 h-px bg-black/5" />
+            <ItemBtn
               icon={<Copy size={12} />}
               label="내용 복사"
               onClick={() => {
@@ -231,6 +240,8 @@ export function StudioMemoViewer({ itemId }: { itemId: number }): JSX.Element {
         {item.kind === 'mnemonic' && <MnemonicView item={item} />}
         {item.kind === 'feynman' && <FeynmanView item={item} />}
         {item.kind === 'exam_radar' && <ExamRadarView item={item} />}
+        {item.kind === 'tutor' && <TutorView item={item} />}
+        {item.kind === 'live_tutor' && <LiveTutorView item={item} />}
       </div>
     </div>
   )
