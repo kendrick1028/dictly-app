@@ -116,7 +116,7 @@ function applyAnnSnap(opId: string, snap: Annotation | null): void {
 
 const PANEL_SIZES_KEY = 'dictly.panelSizes'
 /** what's-new pages to show when the running version has no entry (설정 → 새 기능 보기) */
-const RELEASE_FALLBACK_VERSION = '0.6.1'
+const RELEASE_FALLBACK_VERSION = '0.6.2'
 /** dev and packaged builds share one DB — keep the "already seen" flag separate so testing the popup
  *  in dev never hides it from the installed app */
 const WHATS_NEW_SEEN_KEY = import.meta.env.DEV ? 'whatsNew.seen.dev' : 'whatsNew.seen'

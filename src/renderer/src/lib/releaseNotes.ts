@@ -141,7 +141,9 @@ const PAGES_061: WhatsNewPage[] = [
         bullets: [
           '실시간 튜터: 설명이 나오는 동안 자동으로 따라 내려가고, 생성 중엔 회색 뼈대가 먼저 보여요. 문단이 나뉘고 설명이 더 쉬워졌어요.',
           '번역·튜터의 수식이 깨지지 않고 렌더링돼요. 스크롤바는 스크롤할 때만 보여요.',
-          'PDF 이어 보기에서 마지막 페이지까지 제대로 잡히고, 패널 크기를 바꿔도 페이지가 튀지 않아요. 좁은 창에서 옵션 창이 잘리지 않아요.'
+          'PDF 이어 보기에서 마지막 페이지까지 제대로 잡히고, 패널 크기를 바꿔도 페이지가 튀지 않아요. 좁은 창에서 옵션 창이 잘리지 않아요.',
+          '녹음 중 전사문의 마지막 줄이 녹음 알약 아래로 깔리지 않게 여백을 두고, 자동 스크롤이 저절로 풀리던 문제를 고쳤어요. (0.6.2)',
+          'Windows 버전이 나왔어요 — 설치 파일(.exe)로 설치하고, 전사는 CPU로 돌아가요. Live 전사는 Mac 전용이에요. (0.6.2)'
         ],
         Icon: Wrench,
         tile: 'from-slate-50 to-zinc-200',
@@ -279,21 +281,29 @@ const byBadge = (pages: WhatsNewPage[], badge: WhatsNewPage['badge']): WhatsNewP
 const misc = PAGES_061.find((p) => p.id === 'misc')!
 const own061 = PAGES_061.filter((p) => p.id !== 'misc')
 
+// big things first: new features (0.6.1 then 0.6.0), then improvements, small fixes bundled last
+const PAGES_061_TOUR: WhatsNewPage[] = [
+  HERO_PAGE,
+  ...pick(PAGES_061, 'live'),
+  ...pick(PAGES_060, 'autoPage', 'breakDetect'),
+  ...byBadge(own061, '신기능').filter((p) => p.id !== 'live'),
+  ...byBadge(PAGES_060, '신기능').filter((p) => p.id !== 'autoPage' && p.id !== 'breakDetect'),
+  ...byBadge(own061, '개선'),
+  ...byBadge(PAGES_060, '개선'),
+  misc
+]
+
 export const RELEASE_NOTES: ReleaseNotes[] = [
+  {
+    // 0.6.2 = 0.6.1 + live-scroll fix + Windows build: same tour, so anyone who skipped 0.6.1 sees it all
+    version: '0.6.2',
+    headline: '녹음 알약이 정리되고, Antigravity로도 연결돼요',
+    pages: PAGES_061_TOUR
+  },
   {
     version: '0.6.1',
     headline: '녹음 알약이 정리되고, Antigravity로도 연결돼요',
-    // big things first: new features (0.6.1 then 0.6.0), then improvements, small fixes bundled last
-    pages: [
-      HERO_PAGE,
-      ...pick(PAGES_061, 'live'),
-      ...pick(PAGES_060, 'autoPage', 'breakDetect'),
-      ...byBadge(own061, '신기능').filter((p) => p.id !== 'live'),
-      ...byBadge(PAGES_060, '신기능').filter((p) => p.id !== 'autoPage' && p.id !== 'breakDetect'),
-      ...byBadge(own061, '개선'),
-      ...byBadge(PAGES_060, '개선'),
-      misc
-    ]
+    pages: PAGES_061_TOUR
   },
   {
     version: '0.6.0',
