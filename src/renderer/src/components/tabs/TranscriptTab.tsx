@@ -7,7 +7,7 @@ import { applyMathRules, segmentsToMarkdown } from '../../math/koMathRules'
 import { fmtClock, fmtRange } from '../../lib/time'
 import { addRuntimeReplacement, markLiveEdited } from '../../audio/recorderController'
 import { isHeading } from '../../lib/structure'
-import { useStickToBottom, JumpToLatest } from '../../lib/useStickToBottom'
+import { useStickToBottom, JumpToLatest, scrollPaneToEnd } from '../../lib/useStickToBottom'
 import type { Segment } from '../../../../shared/types'
 
 function TypingDots(): JSX.Element {
@@ -30,17 +30,19 @@ const CORR_DUR = 3.2
  * recording/paused). The preview updates ~2x/s; keeping it here means those updates re-render
  * just this one line, not the whole (potentially huge) segment list above it.
  */
-function LivePreviewLine({ show, follow }: { show: boolean; follow: RefObject<boolean> }): JSX.Element | null {
+function LivePreviewLine({ show, follow, pane }: { show: boolean; follow: RefObject<boolean>; pane: RefObject<HTMLElement> }): JSX.Element | null {
   const partial = useStore((s) => s.rec.partial)
   const isRecording = useStore((s) => s.rec.isRecording)
   const paused = useStore((s) => s.rec.paused)
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    // instant (not 'smooth'): repeated smooth scrollIntoView on every partial piles up
-    // animations that starve the waveform's rAF and make the preview flicker.
+    // instant (not 'smooth'): repeated smooth scrolls on every partial pile up animations that
+    // starve the waveform's rAF and make the preview flicker.
     // `follow` is false while the user has scrolled up to read — never yank them back down.
-    if (partial && follow.current) ref.current?.scrollIntoView({ block: 'end' })
-  }, [partial, follow])
+    // Scroll the PANE to its end (not the line into view) so the pane's bottom padding keeps the
+    // preview clear of the floating recording pill and following isn't dropped on every tick.
+    if (partial && follow.current) scrollPaneToEnd(pane.current)
+  }, [partial, follow, pane])
   if (!show || !isRecording || paused) return null
   return (
     // dots on their OWN line (not inline after the text) so they stay fixed at the bottom-left
@@ -130,7 +132,6 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
   const [bulkTo, setBulkTo] = useState('')
   const [flashIdx, setFlashIdx] = useState<number | null>(null)
   const audioRef = useRef<HTMLAudioElement>(null)
-  const bottomRef = useRef<HTMLDivElement>(null)
   const taRef = useRef<HTMLTextAreaElement>(null)
   const toolbarRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -222,7 +223,7 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
   useEffect(() => {
     // scroll on NEW segments only (partial-driven scrolling lives in LivePreviewLine, so it
     // no longer thrashes layout on every preview tick)
-    if (live && editIdx === null && followRef.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    if (live && editIdx === null && followRef.current) scrollPaneToEnd(contentRef.current, true)
   }, [segments.length, live, editIdx, followRef])
 
   // jump to a cited source — by quote (folder-chat badges) or by time (studio citation chips) — and flash it
@@ -573,8 +574,9 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
       </div>
 
       <div className="relative min-h-0 flex-1">
-      {/* extra bottom padding: the floating recording pill overlaps the last lines otherwise */}
-      <div ref={contentRef} className="absolute inset-0 overflow-y-auto px-4 pb-28">
+      {/* generous bottom padding: the floating recording pill / ↓ button sit over the last ~80px, so the
+          newest line (which auto-follow keeps at the pane's end) needs room above them */}
+      <div ref={contentRef} className="absolute inset-0 overflow-y-auto px-4 pb-36">
         {isRecordingThis && finalizing && (
           <div className="sticky top-0 z-10 mb-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-700 shadow-sm">
             <Loader2 size={14} className="animate-spin" /> 남은 음성 전사·교정 마무리 중…
@@ -700,8 +702,7 @@ export function TranscriptTab({ searchOpen = false, onCloseSearch }: { searchOpe
               </div>
             )
           })}
-          <LivePreviewLine show={isRecordingThis} follow={followRef} />
-          <div ref={bottomRef} />
+          <LivePreviewLine show={isRecordingThis} follow={followRef} pane={contentRef} />
         </div>
       </div>
       {live && !following && <JumpToLatest onClick={scrollToBottom} />}

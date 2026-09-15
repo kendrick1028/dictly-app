@@ -15,6 +15,7 @@ export function useStickToBottom(ref: RefObject<HTMLElement>): {
   const [following, setFollowing] = useState(true)
   const followRef = useRef(true)
   const lastTop = useRef(0)
+  const lastHeight = useRef(0)
   const attached = useRef<HTMLElement | null>(null)
   const set = useCallback((v: boolean) => {
     if (followRef.current === v) return
@@ -28,11 +29,16 @@ export function useStickToBottom(ref: RefObject<HTMLElement>): {
     if (!el || attached.current === el) return
     attached.current = el
     lastTop.current = el.scrollTop
+    lastHeight.current = el.scrollHeight
     const onScroll = (): void => {
       const dist = el.scrollHeight - el.scrollTop - el.clientHeight
-      if (el.scrollTop < lastTop.current - 1 && dist > 24) set(false) // user scrolled up → pause
+      // scrollTop also drops when the CONTENT shrinks (a live preview line replaced by a shorter
+      // one / cleared on finalize) — that is not the user scrolling up, so never pause on it
+      const shrank = el.scrollHeight < lastHeight.current
+      if (!shrank && el.scrollTop < lastTop.current - 1 && dist > 24) set(false) // user scrolled up → pause
       else if (dist <= 4) set(true) // back at the bottom → follow again
       lastTop.current = el.scrollTop
+      lastHeight.current = el.scrollHeight
     }
     el.addEventListener('scroll', onScroll, { passive: true })
     return () => {
@@ -46,6 +52,16 @@ export function useStickToBottom(ref: RefObject<HTMLElement>): {
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'instant' })
   }, [ref, set])
   return { following, followRef, scrollToBottom }
+}
+
+/**
+ * Scroll a pane to its very end. Unlike `scrollIntoView({block:'end'})` on the last line, this
+ * respects the pane's bottom padding (the space reserved for the floating recording pill), and it
+ * lands at dist=0 so the hook keeps `following` on instead of reading the gap as a scroll-up.
+ */
+export function scrollPaneToEnd(el: HTMLElement | null, smooth = false): void {
+  if (!el) return
+  el.scrollTo({ top: el.scrollHeight, behavior: smooth ? 'smooth' : 'instant' })
 }
 
 /** round ↓ button shown over the pane while following is paused during a live transcription */

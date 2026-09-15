@@ -3,7 +3,7 @@ import { useStore } from '../../store/useStore'
 import { MarkdownMath } from '../MarkdownMath'
 import { applyMathRules } from '../../math/koMathRules'
 import { buildScript } from '../../lib/structure'
-import { useStickToBottom, JumpToLatest } from '../../lib/useStickToBottom'
+import { useStickToBottom, JumpToLatest, scrollPaneToEnd } from '../../lib/useStickToBottom'
 
 const EMPTY_RULES: Record<string, string> = {}
 
@@ -24,15 +24,16 @@ const RawBody = memo(function RawBody({ md }: { md: string }): JSX.Element {
 })
 
 // live preview line isolated so partial updates re-render only this line
-function RawPreview({ follow }: { follow: RefObject<boolean> }): JSX.Element | null {
+function RawPreview({ follow, pane }: { follow: RefObject<boolean>; pane: RefObject<HTMLElement> }): JSX.Element | null {
   const partial = useStore((s) => s.rec.partial)
   const paused = useStore((s) => s.rec.paused)
   const ref = useRef<HTMLDivElement>(null)
   useEffect(() => {
     // instant (not 'smooth') — avoids piling up scroll animations that starve the waveform rAF.
     // `follow` is false while the user scrolled up to read — don't drag them back down.
-    if (partial && !paused && follow.current) ref.current?.scrollIntoView({ block: 'end' })
-  }, [partial, paused, follow])
+    // scroll the pane to its end (keeps the bottom padding clear of the recording pill)
+    if (partial && !paused && follow.current) scrollPaneToEnd(pane.current)
+  }, [partial, paused, follow, pane])
   if (paused) return null
   return (
     <div ref={ref} className="py-1 text-subtle">
@@ -52,7 +53,6 @@ export function RawTab(): JSX.Element {
   const isRecording = useStore((s) => s.rec.isRecording)
   const finalizing = useStore((s) => s.rec.finalizing)
   const liveSegments = useStore((s) => s.rec.liveSegments)
-  const bottomRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const { following, followRef, scrollToBottom } = useStickToBottom(contentRef)
 
@@ -74,7 +74,7 @@ export function RawTab(): JSX.Element {
 
   // keep the latest line in view on new content (partial-driven scrolling is in RawPreview)
   useEffect(() => {
-    if (live && followRef.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    if (live && followRef.current) scrollPaneToEnd(contentRef.current, true)
   }, [script, live, followRef])
 
   if (!memo) return <div />
@@ -84,7 +84,7 @@ export function RawTab(): JSX.Element {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 px-5 py-2 text-[12px] text-subtle">타임라인 없이 이어진 연속 대본 · 실시간</div>
       <div className="relative min-h-0 flex-1">
-        <div ref={contentRef} className="absolute inset-0 overflow-y-auto px-5 pb-28">
+        <div ref={contentRef} className="absolute inset-0 overflow-y-auto px-5 pb-36">
           {hasContent ? (
             <RawBody md={md} />
           ) : (
@@ -93,8 +93,7 @@ export function RawTab(): JSX.Element {
               <p className="mt-1 text-[13px]">녹음을 시작하면 여기에 연속 대본이 실시간으로 쌓입니다</p>
             </div>
           )}
-          {live && <RawPreview follow={followRef} />}
-          <div ref={bottomRef} />
+          {live && <RawPreview follow={followRef} pane={contentRef} />}
         </div>
         {live && !following && <JumpToLatest onClick={scrollToBottom} />}
       </div>
