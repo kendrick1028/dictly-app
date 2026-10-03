@@ -634,7 +634,15 @@ body {
 .dictly-wn-in-r { animation: dictly-wn-in-r 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 .dictly-wn-in-l { animation: dictly-wn-in-l 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
 
-/* skeleton shimmer (실시간 튜터 카드가 생성되기 전) */
+/* 코파일럿 카드의 인용 블록: 교수님 말은 회색 세로선, 교안 인용(📄 로 시작)은 점선. 강조 콜아웃이 아니라
+   "인용"으로 읽히도록 배경 없이 조용하게 */
+.dictly-copilot.prose-dictly blockquote {
+  @apply my-2 rounded-none border-l-2 border-black/15 bg-transparent py-0.5 pl-3 pr-0 text-[13px] leading-[1.7] text-ink/80;
+}
+.dictly-copilot.prose-dictly blockquote p {
+  @apply my-0;
+}
+/* skeleton shimmer (코파일럿 카드가 생성되기 전) */
 @keyframes dictly-shimmer {
   0% { background-position: -200% 0; }
   100% { background-position: 200% 0; }
@@ -657,3 +665,9 @@ body {
   50% { transform: scaleY(1); }
 }
 .dictly-wn-bar { transform-origin: center; animation: dictly-wn-bar 1.15s ease-in-out infinite; }
+/* 0.7.0 remote demo: packets travelling between the MacBook and the Mac mini */
+@keyframes dictly-wn-packet-r { from { left: 0; opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } to { left: calc(100% - 6px); opacity: 0; } }
+@keyframes dictly-wn-packet-l { from { left: calc(100% - 10px); opacity: 0; } 15% { opacity: 1; } 85% { opacity: 1; } to { left: 0; opacity: 0; } }
+.dictly-wn-packet-r { animation: dictly-wn-packet-r 1.35s linear infinite both; }
+.dictly-wn-packet-l { animation: dictly-wn-packet-l 1.35s linear infinite both; }
+@media (prefers-reduced-motion: reduce) { .dictly-wn-packet-r, .dictly-wn-packet-l { animation: none; } }

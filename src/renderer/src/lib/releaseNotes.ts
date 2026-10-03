@@ -2,7 +2,7 @@
 // someone who has never seen the feature: what it does, where to find it, one concrete example.
 // Add a new entry at the TOP when releasing; the modal shows the entry matching app.getVersion().
 import type { LucideIcon } from 'lucide-react'
-import { BookOpenCheck, Coffee, GraduationCap, ArrowDownToLine, Sparkles, Send, UserRoundCheck, ShieldCheck, Mic, SlidersHorizontal, AudioWaveform, Type, Wrench, Orbit, Zap } from 'lucide-react'
+import { BookOpenCheck, Coffee, GraduationCap, ArrowDownToLine, Sparkles, Send, UserRoundCheck, ShieldCheck, Mic, SlidersHorizontal, AudioWaveform, Type, Wrench, Orbit, Zap, Server, MessageCircleQuestion } from 'lucide-react'
 
 export type Illustration =
   | 'autoPage'
@@ -21,6 +21,10 @@ export type Illustration =
   | 'pulse'
   | 'pdfText'
   | 'misc'
+  | 'remote'
+  | 'copilot'
+  | 'copilotAsk'
+  | 'models'
 
 export interface WhatsNewPage {
   id: string
@@ -293,7 +297,75 @@ const PAGES_061_TOUR: WhatsNewPage[] = [
   misc
 ]
 
+/** 0.7.0: transcription on another Mac + the 코파일럿 rework */
+const PAGES_070: WhatsNewPage[] = [
+  {
+    id: 'remote',
+    badge: '신기능',
+    title: '맥미니에서 전사하고, 맥북은 가볍게',
+    lead: '녹음한 음성을 Tailscale로 다른 Mac에 보내 그 Mac의 GPU로 전사하고, 글자만 받아 와요. 실시간 교정도 그 Mac의 Claude가 해요.',
+    bullets: [
+      '맥북은 마이크와 화면만 써서 배터리와 발열이 크게 줄어요. 그 Mac 화면에는 아무것도 뜨지 않아요.',
+      '연결이 끊기면 스스로 다시 붙고, 끊긴 구간도 다시 전사해요. 안 닿으면 이 Mac에서 이어 가요.',
+      '설정 → 전사 서버에서 켜요. SSH로 접속되는 Mac이면 "그 Mac에 설치"로 바로 준비돼요.'
+    ],
+    Icon: Server,
+    tile: 'from-indigo-50 to-sky-100',
+    tint: 'text-indigo-700',
+    illustration: 'remote'
+  },
+  {
+    id: 'copilot',
+    badge: '신기능',
+    title: '실시간 튜터가 코파일럿이 됐어요',
+    lead: '교수님의 핵심 문장을 그대로 인용하고, 바로 아래에서 "이 말은 이런 뜻이에요"라고 쉽게 풀어 줘요.',
+    bullets: [
+      '맨 위에 핵심 키워드, 교수님 말과 교안 문장은 인용으로, 풀이는 불릿으로 정리돼요.',
+      '중요한 설명에서만 카드가 생기고, 이미 설명한 용어는 다시 풀지 않아요. 교수님의 질문이나 교안 문제는 직접 풀어 줘요.',
+      '노트마다 코파일럿이 하나라서, 녹음을 멈췄다 이어 가도 같은 흐름으로 계속돼요.'
+    ],
+    Icon: GraduationCap,
+    tile: 'from-orange-50 to-rose-100',
+    tint: 'text-orange-700',
+    illustration: 'copilot'
+  },
+  {
+    id: 'copilotAsk',
+    badge: '신기능',
+    title: '코파일럿에게 바로 질문하기',
+    lead: '강의를 듣다가 궁금한 걸 코파일럿 아래 입력창에 물어보면, 방금 들은 강의와 교안을 근거로 답해 줘요.',
+    bullets: [
+      '녹음 중에는 질문이 먼저예요. 설명을 만들던 중이어도 답부터 하고 이어서 설명해요.',
+      '녹음이 끝난 노트에서도 질문할 수 있고, 질문과 답은 노트에 함께 저장돼요.',
+      '수식이 깨져 보이던 문제도 고쳤어요.'
+    ],
+    Icon: MessageCircleQuestion,
+    tile: 'from-amber-50 to-orange-100',
+    tint: 'text-amber-700',
+    illustration: 'copilotAsk'
+  },
+  {
+    id: 'models',
+    badge: '개선',
+    title: '최신 Claude · GPT 모델',
+    lead: 'Claude는 Opus 5.5 · Fable 5.1 · Sonnet 5.5 · Haiku 4.5, GPT는 GPT-6 Astra · GPT-6.1 Sol · GPT-6 Luna를 고를 수 있어요.',
+    bullets: [
+      'Claude 기본값은 빠르고 똑똑한 Sonnet 5.5예요. 녹음 바의 모델 메뉴에서 바꿀 수 있어요.',
+      'GPT-6 모델은 최신 Codex CLI가 필요해요. 안 되면 터미널에서 npm i -g @openai/codex@latest 로 업데이트하세요.'
+    ],
+    Icon: Sparkles,
+    tile: 'from-violet-50 to-fuchsia-100',
+    tint: 'text-violet-700',
+    illustration: 'models'
+  }
+]
+
 export const RELEASE_NOTES: ReleaseNotes[] = [
+  {
+    version: '0.7.0',
+    headline: '맥미니에서 전사하고, 코파일럿이 옆에서 풀어 줘요',
+    pages: PAGES_070
+  },
   {
     // 0.6.2 = 0.6.1 + live-scroll fix + Windows build: same tour, so anyone who skipped 0.6.1 sees it all
     version: '0.6.2',

@@ -28,6 +28,14 @@ function resolveCodexBin(): string | null {
 }
 
 /** cheap availability check (no spawn) — the codex CLI wrapper is present. */
+/** an older Codex CLI doesn't know the GPT-6 models and reports them as unsupported */
+function codexErrorHint(err: string): string {
+  if (/model is not supported when using Codex/i.test(err)) {
+    return `${err}\n\n이 GPT 모델은 최신 Codex CLI가 필요해요. 터미널에서 \`npm i -g @openai/codex@latest\` 로 업데이트하거나, 모델을 gpt-5.6으로 바꿔 주세요.`
+  }
+  return err
+}
+
 export function hasCodexBin(): boolean {
   return resolveCodexBin() != null
 }
@@ -192,7 +200,7 @@ export function runCodex(opts: RunClaudeOptions, reasoning = 'low'): Promise<str
       unlink(outFile, () => {})
       if (text) resolve(text)
       else if (code === 0) resolve('')
-      else reject(new Error(err.trim() || `codex 종료 코드 ${code}`))
+      else reject(new Error(codexErrorHint(err.trim()) || `codex 종료 코드 ${code}`))
     })
 
     if (opts.content) p.stdin.write(opts.content)
@@ -268,7 +276,7 @@ export function runCodexStream(opts: RunClaudeOptions, reasoning = 'low', onDelt
       clearTimeout(timer)
       if (full) resolve(full.trim())
       else if (code === 0) resolve('')
-      else reject(new Error(err.trim() || `codex 종료 코드 ${code}`))
+      else reject(new Error(codexErrorHint(err.trim()) || `codex 종료 코드 ${code}`))
     })
 
     if (opts.content) p.stdin.write(opts.content)
@@ -327,7 +335,7 @@ export function runCodexVision(
       unlink(outFile, () => {})
       if (text) resolve(text)
       else if (code === 0) resolve('')
-      else reject(new Error(err.trim() || `codex 종료 코드 ${code}`))
+      else reject(new Error(codexErrorHint(err.trim()) || `codex 종료 코드 ${code}`))
     })
     p.stdin.end()
   }))

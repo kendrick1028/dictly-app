@@ -268,6 +268,8 @@ export interface LiveTutorCard {
   /** 교안 page the tracker had at the time (null = no PDF / unknown) */
   pdfPage: number | null
   createdAt: number
+  /** set when this card answers a question the student typed (sourceText = the question) */
+  question?: string | null
 }
 export interface LiveTutorContent {
   cards: LiveTutorCard[]
@@ -509,6 +511,34 @@ export type UpdateState =
   | { state: 'ready'; version: string }
   | { state: 'none'; version: string }
   | { state: 'error'; message: string }
+
+/** transcription sidecar status (local python, or the remote Mac through an SSH tunnel) */
+export interface SttSidecarState {
+  running: boolean
+  port: number | null
+  error: string | null
+  remote: boolean
+  remoteWanted: boolean
+  note: string | null
+}
+/** transcription on another Mac (Tailscale + SSH): ssh_config host alias */
+export interface SttRemoteConfig {
+  on: boolean
+  host: string
+  /** live correction with the remote account's Claude CLI */
+  correct: boolean
+}
+export interface SttRemoteTest {
+  ok: boolean
+  error?: string
+  latencyMs?: number
+  chip?: string
+  memoryGb?: number
+  runtime?: boolean
+  gpu?: boolean
+  models?: boolean
+  claude?: string | null
+}
 
 /** one billed cloud-API call/session (transcription engines), for the dashboard cost chart */
 export interface ApiUsageRow {

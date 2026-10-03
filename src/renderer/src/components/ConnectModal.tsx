@@ -388,7 +388,7 @@ export function ConnectModal(): JSX.Element | null {
               keyField="claude"
               onSaveKey={setAnthropicKey}
               placeholder="sk-ant-..."
-              modelPlaceholder="claude-3-5-sonnet-latest"
+              modelPlaceholder="claude-sonnet-5-5"
             />
             <ApiCard
               engine="gpt"
@@ -397,7 +397,7 @@ export function ConnectModal(): JSX.Element | null {
               keyField="openai"
               onSaveKey={setOpenaiKey}
               placeholder="sk-..."
-              modelPlaceholder="gpt-4o"
+              modelPlaceholder="gpt-6.1-sol"
             />
             <ApiCard
               engine="gemini"

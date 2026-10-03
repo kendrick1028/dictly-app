@@ -403,6 +403,8 @@ interface StoreState {
     cards: LiveTutorCard[]
     streaming: { cardId: string; md: string; tStart?: number; tEnd?: number; pdfPage?: number | null } | null
     error: string | null
+    /** the note these cards belong to (one 코파일럿 per note, continued across recordings) */
+    memoId: number | null
   }
   studioCollapsed: boolean
   /** studio expanded to fill the whole note area (single-section fullscreen) */
@@ -624,7 +626,7 @@ export const useStore = create<StoreState>((set, get) => ({
   antigravity: null,
   connectionMode: 'cli',
   aiEngine: 'claude',
-  gptModel: 'gpt-5.6-terra',
+  gptModel: 'gpt-6.1-sol',
   gptReasoning: 'low',
   claudeEffort: 'low',
   agyModel: '',
@@ -657,7 +659,7 @@ export const useStore = create<StoreState>((set, get) => ({
   folderChatId: null,
   scrollTarget: null,
   activeAgentId: null,
-  claudeModel: 'claude-opus-4-8',
+  claudeModel: 'claude-sonnet-5-5',
   agentManagerOpen: false,
   agentManagerMemoScope: false,
   homeOpen: true, // 대시보드가 첫 화면
@@ -703,7 +705,7 @@ export const useStore = create<StoreState>((set, get) => ({
   autoPage: { on: false, status: 'off', engine: 'lexical', lastTurnAt: 0, lastAutoPage: null, flash: null, scan: null },
   lectureIntent: { on: false, endAction: 'stop', pending: null, resumeAt: null },
   liveTutorOpen: false,
-  liveTutor: { status: 'idle', cards: [], streaming: null, error: null },
+  liveTutor: { status: 'idle', cards: [], streaming: null, error: null, memoId: null },
   studioCollapsed: false,
   studioFullscreen: false,
   panelSizes: {},

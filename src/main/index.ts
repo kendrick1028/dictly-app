@@ -3,7 +3,7 @@ import { join } from 'path'
 import { initDb } from './db'
 import { registerIpc } from './ipc'
 import { setupAudioLoopback } from './audioLoopback'
-import { stopSidecar } from './sttSidecar'
+import { stopSidecar, shutdownSidecar } from './sttSidecar'
 import { startScheduler } from './scheduler'
 import { setupUpdater } from './updater'
 
@@ -87,4 +87,5 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => stopSidecar())
+// also closes the shared SSH connection to the remote transcription Mac
+app.on('before-quit', () => shutdownSidecar())

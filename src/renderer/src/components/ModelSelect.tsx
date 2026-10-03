@@ -8,12 +8,20 @@ export function PillCompactProvider({ compact, children }: { compact: boolean; c
   return <CompactCtx.Provider value={compact}>{children}</CompactCtx.Provider>
 }
 
+// default = Sonnet 5.5 (store.claudeModel); Fable 5.1 = most capable, Haiku 4.5 = fastest
 export const CLAUDE_MODELS = [
-  { id: 'claude-opus-4-8', label: 'Opus 4.8' },
-  { id: 'claude-sonnet-4-6', label: 'Sonnet 4.6' }
+  { id: 'claude-opus-5-5', label: 'Opus 5.5' },
+  { id: 'claude-fable-5-1', label: 'Fable 5.1' },
+  { id: 'claude-sonnet-5-5', label: 'Sonnet 5.5' },
+  { id: 'claude-haiku-4-5', label: 'Haiku 4.5' }
 ]
+export const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-5-5'
 // GPT-5.6 three-tier family (Codex CLI model ids): Sol = flagship, Terra = balanced, Luna = fast/volume.
+// GPT-6 family first (needs Codex CLI 0.160+); the 5.6 models stay so existing choices keep working
 export const GPT_MODELS = [
+  { id: 'gpt-6-astra', label: 'GPT-6 Astra' },
+  { id: 'gpt-6.1-sol', label: 'GPT-6.1 Sol' },
+  { id: 'gpt-6-luna', label: 'GPT-6 Luna' },
   { id: 'gpt-5.6-sol', label: 'gpt-5.6 Sol' },
   { id: 'gpt-5.6-terra', label: 'gpt-5.6 Terra' },
   { id: 'gpt-5.6-luna', label: 'gpt-5.6 Luna' }

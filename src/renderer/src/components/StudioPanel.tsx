@@ -112,7 +112,7 @@ export function StudioRail(): JSX.Element {
       <button
         onClick={() => toggleLiveTutor()}
         disabled={!aiReady}
-        title={aiReady ? (liveTutorOpen ? '실시간 튜터 닫기' : '실시간 AI 튜터') : '실시간 튜터 — AI 연결 필요'}
+        title={aiReady ? (liveTutorOpen ? '코파일럿 닫기' : '코파일럿') : '코파일럿: AI 연결 필요'}
         className={`flex h-9 w-9 items-center justify-center rounded-xl border transition disabled:opacity-40 ${
           liveTutorOpen ? 'border-orange-300 bg-orange-50 text-orange-700' : 'border-transparent text-subtle hover:bg-black/5'
         }`}

@@ -1,6 +1,6 @@
 {
   "name": "dictly",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "description": "로컬 STT 음성인식 기록 앱 (Dictly)",
   "main": "./out/main/index.js",
   "author": "Dictly",

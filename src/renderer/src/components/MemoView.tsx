@@ -103,7 +103,7 @@ export function MemoView(): JSX.Element {
             onClick={() => toggleLiveTutor()}
             disabled={!aiReady}
             className={`rounded-lg p-1.5 hover:bg-black/5 disabled:opacity-40 ${liveTutorOpen ? 'text-accent' : ''}`}
-            title={!aiReady ? '실시간 튜터 — AI 연결 필요' : liveTutorOpen ? '실시간 튜터 닫기' : '실시간 AI 튜터 열기 — 녹음 중 강의 내용을 아주 쉽게 풀어 설명'}
+            title={!aiReady ? '코파일럿: AI 연결 필요' : liveTutorOpen ? '코파일럿 닫기' : '코파일럿 열기: 녹음 중 교수님 설명을 인용하고 쉽게 다시 풀어 줍니다'}
           >
             <GraduationCap size={16} />
           </button>

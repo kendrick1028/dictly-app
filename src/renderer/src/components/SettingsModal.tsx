@@ -5,6 +5,7 @@ import { HelpTip } from './HelpTip'
 import { ACCENT_THEMES } from '../lib/theme'
 import { comboFromEvent, formatShortcut } from '../lib/shortcut'
 import { NotionSettings } from './NotionSettings'
+import { RemoteSttSettings } from './RemoteSttSettings'
 
 /** Click → press a key combo to rebind a shortcut. Captures before app-level shortcuts fire. */
 function ShortcutCapture({ value, onChange }: { value: string; onChange: (s: string) => void }): JSX.Element {
@@ -249,6 +250,9 @@ export function SettingsModal(): JSX.Element | null {
 
           {/* Notion export destination */}
           <NotionSettings />
+
+          {/* transcription server: this Mac or another Mac over Tailscale */}
+          <RemoteSttSettings />
 
           {/* VAD tuning — advanced, collapsed by default */}
           <div className="border-t border-black/5 pt-4">

@@ -31,7 +31,10 @@ import type {
   UpdateState,
   NotionStatus,
   NotionTarget,
-  NotionExportPayload
+  NotionExportPayload,
+  SttSidecarState,
+  SttRemoteConfig,
+  SttRemoteTest
 } from '../shared/types'
 
 const api = {
@@ -120,10 +123,20 @@ const api = {
     listMemoChats: (): Promise<MemoChatSummary[]> => ipcRenderer.invoke('chatSessions:listMemoChats')
   },
   stt: {
-    ensure: (): Promise<{ running: boolean; port: number | null; error: string | null }> =>
-      ipcRenderer.invoke('stt:ensure'),
-    status: (): Promise<{ running: boolean; port: number | null; error: string | null }> =>
-      ipcRenderer.invoke('stt:status')
+    ensure: (): Promise<SttSidecarState> => ipcRenderer.invoke('stt:ensure'),
+    status: (): Promise<SttSidecarState> => ipcRenderer.invoke('stt:status'),
+    restart: (): Promise<SttSidecarState> => ipcRenderer.invoke('stt:restart'),
+    /** local audio path → path the sidecar can read (uploaded when transcription runs remotely) */
+    stageFile: (localPath: string): Promise<string> => ipcRenderer.invoke('stt:stageFile', localPath),
+    getRemote: (): Promise<SttRemoteConfig> => ipcRenderer.invoke('stt:getRemote'),
+    setRemote: (patch: Partial<SttRemoteConfig>): Promise<SttRemoteConfig> => ipcRenderer.invoke('stt:setRemote', patch),
+    testRemote: (host?: string): Promise<SttRemoteTest> => ipcRenderer.invoke('stt:testRemote', host),
+    installRemote: (host?: string): Promise<{ ok: boolean; error?: string }> => ipcRenderer.invoke('stt:installRemote', host),
+    onInstallProgress: (cb: (msg: string) => void): (() => void) => {
+      const l = (_e: unknown, m: string): void => cb(m)
+      ipcRenderer.on('stt:installProgress', l)
+      return () => ipcRenderer.removeListener('stt:installProgress', l)
+    }
   },
   ai: {
     status: (): Promise<AiStatus> => ipcRenderer.invoke('ai:status'),

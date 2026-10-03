@@ -64,6 +64,18 @@ function escapeCurrencyDollars(text: string): string {
   return out
 }
 
+/**
+ * Models (and slide text pasted into prompts) often write LaTeX with `\( … \)` / `\[ … \]`
+ * delimiters. remark-math only understands `$ … $` / `$$ … $$`, and markdown would eat the
+ * backslash and leave "(\mu)" on screen. Convert them up front.
+ */
+function normalizeMathDelimiters(text: string): string {
+  if (!text || text.indexOf('\\') < 0) return text
+  return text
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_m, inner: string) => `$$${inner.trim()}$$`)
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_m, inner: string) => `$${inner.trim()}$`)
+}
+
 export function MarkdownMath({
   children,
   className,
@@ -81,7 +93,7 @@ export function MarkdownMath({
         rehypePlugins={[rehypeRaw, [rehypeKatex, { strict: false, throwOnError: false }]]}
         components={components}
       >
-        {escapeCurrencyDollars(children || '')}
+        {escapeCurrencyDollars(normalizeMathDelimiters(children || ''))}
       </ReactMarkdown>
     </div>
   )

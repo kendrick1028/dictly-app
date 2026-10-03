@@ -5,6 +5,7 @@ import { ArrowDown, ArrowRight, Check, ChevronDown, Coffee, GraduationCap, Mic, 
 import { useStore } from '../store/useStore'
 import type { Illustration, WhatsNewPage } from '../lib/releaseNotes'
 import heroUrl from '../assets/whatsnew-hero.jpg'
+import { RemoteIllus, CopilotIllus, CopilotAskIllus, ModelsIllus } from './whatsnew/Illus070'
 
 
 /** Notion wordmark glyph (monochrome cube-N) */
@@ -80,6 +81,14 @@ function Illus({ kind, tint }: { kind: Illustration; tint: string }): JSX.Elemen
       return <PdfTextIllus />
     case 'misc':
       return <MiscIllus />
+    case 'remote':
+      return <RemoteIllus />
+    case 'copilot':
+      return <CopilotIllus />
+    case 'copilotAsk':
+      return <CopilotAskIllus />
+    case 'models':
+      return <ModelsIllus />
     case 'fallback':
       return (
         <div className="w-[320px] rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[11.5px] text-amber-800 shadow-md">
@@ -406,7 +415,7 @@ function LiveTutorIllus(): JSX.Element {
       </div>
       <div className="rounded-xl border border-black/5 bg-white/95 p-2.5 shadow-lg">
         <div className="mb-1.5 flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-subtle">
-          <GraduationCap size={12} className="text-orange-600" /> 실시간 튜터
+          <GraduationCap size={12} className="text-orange-600" /> 코파일럿
           <span className={`ml-1 inline-block h-1.5 w-1.5 rounded-full ${busy ? 'animate-pulse bg-accent' : phase === 'done' ? 'bg-emerald-500' : 'bg-gray-300'}`} />
           {busy && <span className="ml-auto text-[9.5px] font-normal normal-case text-accent">{phase === 'thinking' ? '생각 중…' : '설명 생성 중…'}</span>}
         </div>

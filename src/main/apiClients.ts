@@ -6,12 +6,13 @@ import { extname } from 'path'
 import type { RunClaudeOptions } from './claudeCli'
 
 export const API_DEFAULTS = {
-  anthropic: 'claude-3-5-sonnet-latest',
-  openai: 'gpt-4o',
+  anthropic: 'claude-sonnet-5-5',
+  openai: 'gpt-6.1-sol',
   gemini: 'gemini-2.0-flash'
 }
 
-const MAX_TOKENS = 8192
+// current Claude models think by default and that thinking counts toward max_tokens
+const MAX_TOKENS = 16000
 
 /** instruction + (optional) large stdin content → one user prompt string */
 function userPrompt(opts: RunClaudeOptions): string {

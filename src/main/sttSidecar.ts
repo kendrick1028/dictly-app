@@ -1,21 +1,28 @@
 import { app } from 'electron'
-import { spawn, ChildProcessWithoutNullStreams } from 'child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process'
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { dataDir } from './db'
+import { remoteConfig, launchRemote, stageRemoteFile, closeMaster } from './remoteStt'
 
-interface SidecarState {
+export interface SidecarState {
   running: boolean
   port: number | null
   error: string | null
+  /** true = the server runs on the remote Mac (port is the local end of the SSH tunnel) */
+  remote: boolean
+  /** remote transcription is turned on in settings */
+  remoteWanted: boolean
+  /** one-line notice for the UI, e.g. "맥미니에 연결하지 못해 이 Mac에서 전사합니다" */
+  note: string | null
 }
 
 let proc: ChildProcessWithoutNullStreams | null = null
-let state: SidecarState = { running: false, port: null, error: null }
+let state: SidecarState = { running: false, port: null, error: null, remote: false, remoteWanted: false, note: null }
 let startPromise: Promise<SidecarState> | null = null
 
 /** Locate the python/ directory in dev (repo root) or packaged (resources). */
-function pythonDir(): string {
+export function pythonDir(): string {
   const candidates = [
     join(app.getAppPath(), 'python'),
     join(app.getAppPath(), '..', 'python'),
@@ -42,28 +49,44 @@ function venvPython(dir: string): string | null {
 }
 
 export function getSttStatus(): SidecarState {
-  return state
+  return { ...state, remoteWanted: remoteConfig().on }
 }
 
-export function ensureSidecar(): Promise<SidecarState> {
-  if (state.running && state.port) return Promise.resolve(state)
-  if (startPromise) return startPromise
+/** a sidecar process (local python or the ssh session to the remote one) went away */
+function attachExit(p: ChildProcessWithoutNullStreams, remote: boolean): void {
+  p.on('exit', (code) => {
+    console.log(`[stt${remote ? ':remote' : ''}] exited`, code)
+    if (proc !== p) return // already replaced (restart)
+    state = {
+      running: false,
+      port: null,
+      error: code ? (remote ? '맥미니 전사 서버 연결이 끊겼습니다' : `STT 프로세스 종료 (code ${code})`) : null,
+      remote: false,
+      remoteWanted: remoteConfig().on,
+      note: null
+    }
+    proc = null
+  })
+}
 
-  startPromise = new Promise<SidecarState>((resolve) => {
+function startLocal(): Promise<SidecarState> {
+  return new Promise<SidecarState>((resolve) => {
     const dir = pythonDir()
     const py = venvPython(dir)
+    const wanted = remoteConfig().on
     if (!py) {
       state = {
         running: false,
         port: null,
-        error: 'Python 환경이 없습니다. 터미널에서 `bash python/setup_env.sh` 를 실행하세요.'
+        error: 'Python 환경이 없습니다. 터미널에서 `bash python/setup_env.sh` 를 실행하세요.',
+        remote: false,
+        remoteWanted: wanted,
+        note: null
       }
-      startPromise = null
       return resolve(state)
     }
 
-    const script = join(dir, 'stt_server.py')
-    proc = spawn(py, ['-u', script], {
+    const p = spawn(py, ['-u', join(dir, 'stt_server.py')], {
       cwd: dir,
       env: {
         ...process.env,
@@ -78,68 +101,97 @@ export function ensureSidecar(): Promise<SidecarState> {
         HF_HUB_DISABLE_XET: '1'
       }
     })
+    proc = p
+    attachExit(p, false)
 
     let settled = false
-    const onLine = (line: string) => {
-      const trimmed = line.trim()
-      if (!trimmed) return
-      if (trimmed.startsWith('DICTLY_PORT')) {
-        const port = parseInt(trimmed.split(/\s+/)[1], 10)
-        state = { running: true, port, error: null }
-        if (!settled) {
-          settled = true
-          resolve(state)
-        }
-      } else {
-        // forward sidecar logs for debugging
-        console.log('[stt]', trimmed)
-      }
+    const settle = (s: SidecarState): void => {
+      if (settled) return
+      settled = true
+      state = s
+      resolve(s)
     }
-
     let buf = ''
-    proc.stdout.on('data', (d: Buffer) => {
+    p.stdout.on('data', (d: Buffer) => {
       buf += d.toString()
       let idx: number
       while ((idx = buf.indexOf('\n')) >= 0) {
-        onLine(buf.slice(0, idx))
+        const line = buf.slice(0, idx).trim()
         buf = buf.slice(idx + 1)
+        if (!line) continue
+        if (line.startsWith('DICTLY_PORT')) {
+          const port = parseInt(line.split(/\s+/)[1], 10)
+          settle({ running: true, port, error: null, remote: false, remoteWanted: wanted, note: null })
+        } else console.log('[stt]', line) // forward sidecar logs for debugging
       }
     })
-    proc.stderr.on('data', (d: Buffer) => console.error('[stt:err]', d.toString().trim()))
-
-    proc.on('exit', (code) => {
-      console.log('[stt] exited', code)
-      state = { running: false, port: null, error: code ? `STT 프로세스 종료 (code ${code})` : null }
-      proc = null
-      startPromise = null
+    p.stderr.on('data', (d: Buffer) => console.error('[stt:err]', d.toString().trim()))
+    p.on('error', (err) => {
+      if (proc === p) proc = null
+      settle({ running: false, port: null, error: `STT 프로세스 실행 실패: ${err.message}`, remote: false, remoteWanted: wanted, note: null })
     })
-    proc.on('error', (err) => {
-      state = { running: false, port: null, error: `STT 프로세스 실행 실패: ${err.message}` }
-      proc = null
-      startPromise = null
-      if (!settled) {
-        settled = true
-        resolve(state)
-      }
-    })
-
     // safety timeout: if server never reports a port
-    setTimeout(() => {
-      if (!settled) {
-        settled = true
-        if (!state.port) state = { running: false, port: null, error: 'STT 서버 시작 시간 초과' }
-        resolve(state)
-      }
-    }, 20000)
+    setTimeout(() => settle({ running: false, port: null, error: 'STT 서버 시작 시간 초과', remote: false, remoteWanted: wanted, note: null }), 20000)
   })
+}
 
+async function startRemote(host: string): Promise<SidecarState> {
+  const launch = await launchRemote(host, pythonDir(), (l) => console.log('[stt:remote]', l))
+  proc = launch.proc
+  attachExit(launch.proc, true)
+  return { running: true, port: launch.port, error: null, remote: true, remoteWanted: true, note: null }
+}
+
+export function ensureSidecar(): Promise<SidecarState> {
+  if (state.running && state.port) return Promise.resolve(getSttStatus())
+  if (startPromise) return startPromise
+
+  startPromise = (async (): Promise<SidecarState> => {
+    const cfg = remoteConfig()
+    if (cfg.on) {
+      try {
+        state = await startRemote(cfg.host)
+        return state
+      } catch (e) {
+        // the remote Mac is unreachable / not set up → keep working on this Mac
+        const why = (e as Error).message
+        console.warn('[stt:remote] unavailable, falling back to local:', why)
+        const local = await startLocal()
+        state = { ...local, note: local.running ? `맥미니에 연결하지 못해 이 Mac에서 전사합니다 (${why})` : local.note }
+        return state
+      }
+    }
+    return startLocal()
+  })().finally(() => {
+    startPromise = null
+  })
   return startPromise
 }
 
 export function stopSidecar(): void {
   if (proc) {
-    proc.kill()
+    const p = proc
     proc = null
+    p.kill() // remote: closing the ssh session ends the remote server (stdin EOF)
   }
-  state = { running: false, port: null, error: null }
+  state = { running: false, port: null, error: null, remote: false, remoteWanted: remoteConfig().on, note: null }
+}
+
+/** restart with the current settings (remote toggled, or retrying the remote Mac after a fallback) */
+export async function restartSidecar(): Promise<SidecarState> {
+  if (startPromise) await startPromise.catch(() => undefined)
+  stopSidecar()
+  return ensureSidecar()
+}
+
+/** path the sidecar can read for a local audio file (uploaded to the remote Mac when remote) */
+export async function stageSttFile(localPath: string): Promise<string> {
+  if (!state.remote) return localPath
+  return stageRemoteFile(remoteConfig().host, localPath)
+}
+
+/** app quit: stop the server and the shared SSH connection */
+export function shutdownSidecar(): void {
+  stopSidecar()
+  if (remoteConfig().on || remoteConfig().correct) closeMaster()
 }

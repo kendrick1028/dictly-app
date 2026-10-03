@@ -73,8 +73,10 @@ export class LiveLectureEngine {
   // ───────────────────────── lifecycle ─────────────────────────
   static start(memoId: number): LiveLectureEngine {
     engine?.stop()
-    // fresh tutor session (cards from the previous recording were saved as a studio memo)
-    useStore.getState().setLiveTutor({ status: 'idle', cards: [], streaming: null, error: null })
+    // one 코파일럿 per note: cards of the SAME note stay (the recording continues them); another
+    // note's cards are dropped here and the controller restores this note's saved session
+    const lt = useStore.getState().liveTutor
+    useStore.getState().setLiveTutor({ status: 'idle', streaming: null, error: null, ...(lt.memoId === memoId ? {} : { cards: [], memoId }) })
     engine = new LiveLectureEngine(memoId)
     engine.boot()
     return engine

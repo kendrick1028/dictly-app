@@ -3,7 +3,8 @@ import { writeFile, unlink } from 'fs/promises'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import * as db from './db'
-import { ensureSidecar, getSttStatus } from './sttSidecar'
+import { ensureSidecar, getSttStatus, restartSidecar, stageSttFile, pythonDir } from './sttSidecar'
+import { remoteConfig, setRemoteConfig, testRemote, installRemote, runClaudeRemote, type RemoteConfig } from './remoteStt'
 import { claudeStatus, claudeAccount, runClaude, runClaudeStream, runClaudeVision, hasClaudeBin } from './claudeCli'
 import { codexStatus, codexAccount, runCodex, runCodexStream, runCodexVision, hasCodexBin } from './codexCli'
 import { agyStatus, agyAccount, runAgy, runAgyStream, hasAgyBin } from './antigravityCli'
@@ -80,9 +81,9 @@ function agyModelSetting(): string {
 // GPT-5.6 Codex model ids + reasoning-effort values (keep in sync with renderer GPT_MODELS/REASONING).
 // Legacy stored values (old gpt-5*/default model, `minimal` effort) are migrated to valid ones so
 // Codex never gets an unknown `-m`/`model_reasoning_effort` and fails.
-const GPT_MODEL_IDS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']
+const GPT_MODEL_IDS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']
 const GPT_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
-const DEFAULT_GPT_MODEL = 'gpt-5.6-terra'
+const DEFAULT_GPT_MODEL = 'gpt-6.1-sol'
 function gptModelSetting(): string {
   const v = db.getSetting('aiGptModel')
   return v && GPT_MODEL_IDS.includes(v) ? v : DEFAULT_GPT_MODEL
@@ -270,6 +271,17 @@ function runVision(k: ProvKey, imagePaths: string[], instruction: string, system
     case 'gemini-api':
       return runGeminiVision(apiKeyFor('gemini'), imagePaths, instruction, systemPrompt)
   }
+}
+
+/** live correction: on the remote Mac's Claude CLI when that is turned on, otherwise the active
+ *  engine here. A remote failure (offline, CLI error) silently falls back to this Mac. */
+function correctVia(opts: Parameters<typeof runClaude>[0]): Promise<string> {
+  const rc = remoteConfig()
+  if (!rc.on || !rc.correct) return runAI(opts)
+  return runClaudeRemote(rc.host, { ...opts, effort: claudeEffort() }).catch((e) => {
+    console.warn('[correct:remote] failed, using this Mac:', (e as Error).message)
+    return runAI(opts)
+  })
 }
 
 function runAI(opts: Parameters<typeof runClaude>[0]): Promise<string> {
@@ -742,6 +754,28 @@ export function registerIpc(): void {
   // ---- STT sidecar ----
   ipcMain.handle('stt:ensure', () => ensureSidecar())
   ipcMain.handle('stt:status', () => getSttStatus())
+  // retry the remote Mac after a fallback, or apply a changed transcription-server setting
+  ipcMain.handle('stt:restart', () => restartSidecar())
+  // a local audio file → a path the (possibly remote) sidecar can read
+  ipcMain.handle('stt:stageFile', (_e, localPath: string) => stageSttFile(localPath))
+  // ---- remote transcription server (another Mac over Tailscale + SSH) ----
+  ipcMain.handle('stt:getRemote', () => remoteConfig())
+  ipcMain.handle('stt:setRemote', async (_e, patch: Partial<RemoteConfig>) => {
+    const before = remoteConfig()
+    const next = setRemoteConfig(patch)
+    // where transcription runs changed → restart so the next connection goes to the right place
+    if (before.on !== next.on || (next.on && before.host !== next.host)) void restartSidecar()
+    return next
+  })
+  ipcMain.handle('stt:testRemote', (_e, host?: string) => testRemote(host || remoteConfig().host))
+  ipcMain.handle('stt:installRemote', async (e, host?: string) => {
+    try {
+      await installRemote(host || remoteConfig().host, pythonDir(), (msg) => e.sender.send('stt:installProgress', msg))
+      return { ok: true }
+    } catch (err) {
+      return { ok: false, error: (err as Error).message }
+    }
+  })
 
   // ---- Claude ----
   ipcMain.handle('claude:status', () => claudeStatus())
@@ -874,7 +908,7 @@ export function registerIpc(): void {
     'claude:correctChunk',
     // routes through the active engine: Claude (fast) or GPT/Codex (slow but selectable)
     (_e, context: string, followContext: string, chunk: string, systemPrompt: string, model?: string, translate?: string) =>
-      runAI({
+      correctVia({
         instruction:
           '아래 [앞 맥락]은 이미 전사된 앞부분, [뒤 맥락]은 바로 뒤에 이어지는 부분입니다(둘 다 참고용 — 절대 수정/출력하지 말 것). [현재 청크]는 교정할 부분입니다. ' +
           '앞뒤 맥락을 근거로 [현재 청크]의 ★명백한 음성인식 오류만★ 보수적으로 교정하세요. 교정 대상: ' +

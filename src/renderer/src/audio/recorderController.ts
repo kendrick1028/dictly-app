@@ -5,9 +5,11 @@ import type { Segment } from '../../../shared/types'
 import { isWhisperHallucination } from '../../../shared/hallucination'
 import { LiveLectureEngine, liveEngine } from '../live/liveLectureEngine'
 import workletUrl from './pcm-worklet.js?url'
+import { SttLink } from './sttLink'
 
 interface RecSession {
-  ws: WebSocket
+  /** self-healing connection to the (local or remote) transcription server */
+  link: SttLink
   ctx: AudioContext
   source: MediaStreamAudioSourceNode
   node: AudioWorkletNode
@@ -318,6 +320,32 @@ function bumpFinalizeStall(): void {
 // keywords) cut off, and a huge list dilutes the bias. Cap it ourselves so every included term
 // actually biases recognition; priority-first order then guarantees the important terms survive.
 const INITIAL_PROMPT_CAP = 350
+const RECONNECT_MSG = '전사 서버 연결이 끊겨 다시 연결하는 중이에요. 녹음은 계속 저장되고, 끊긴 구간도 다시 전사돼요.'
+
+/** the sidecar session config, rebuilt from the CURRENT settings (start, reconnect, live toggles) */
+async function buildSttConfig(): Promise<Record<string, unknown>> {
+  const st = useStore.getState()
+  const vad = await window.api.settings.getVad()
+  const tr = await window.api.settings.getTranscribe()
+  return {
+    type: 'config',
+    model: st.rec.model,
+    language: st.rec.language,
+    initialPrompt: buildInitialPrompt(),
+    silenceSec: vad.silenceSec,
+    maxSec: vad.maxSec,
+    // Transcription is built-in: finals are always local Whisper. OpenAI Realtime
+    // (gpt-realtime-whisper) is used ONLY when the ⚙ live-preview toggle is on.
+    engine: 'local',
+    apiKey: tr.apiKey,
+    oaiModel: 'gpt-realtime-whisper',
+    realtimePreview: tr.realtimePreview,
+    localPreview: st.rec.localPreview,
+    metaKey: tr.metaKey,
+    keywords: buildKeywordList()
+  }
+}
+
 /** Glossary terms for engines with native vocabulary biasing (Meta `keywords`): the note's own
  *  keywords first, then the agent's transcription + correction keywords. Deduped, capped. */
 function buildKeywordList(): string[] {
@@ -478,6 +506,8 @@ export async function startRecording(): Promise<void> {
   const sidecar = await window.api.stt.ensure()
   if (!sidecar.port) return rollback(sidecar.error ?? 'STT 서버를 시작할 수 없습니다')
   if (cancelStart) return rollback()
+  // remote transcription wanted but this session runs on this Mac (the remote Mac was unreachable)
+  if (sidecar.remoteWanted && !sidecar.remote) st.showToast(sidecar.note ?? '맥미니에 연결하지 못해 이 Mac에서 전사합니다')
   const vad = await window.api.settings.getVad()
   const tr = await window.api.settings.getTranscribe()
 
@@ -529,107 +559,85 @@ export async function startRecording(): Promise<void> {
   const fileSilent = fileCtx.createGain()
   fileSilent.gain.value = 0
 
-  const ws = new WebSocket(`ws://127.0.0.1:${sidecar.port}`)
-  ws.binaryType = 'arraybuffer'
-
-  // buffer PCM produced before the socket opens so no frames are lost (drift)
-  let wsReady = false
-  const pending: ArrayBufferLike[] = []
-
-  ws.onopen = () => {
-    ws.send(
-      JSON.stringify({
-        type: 'config',
-        model: st.rec.model,
-        language: st.rec.language,
-        initialPrompt: buildInitialPrompt(),
-        silenceSec: vad.silenceSec,
-        maxSec: vad.maxSec,
-        // Transcription is built-in: finals are always local Whisper. OpenAI Realtime
-        // (gpt-realtime-whisper) is used ONLY when the ⚙ live-preview toggle is on.
-        engine: 'local',
-        apiKey: tr.apiKey,
-        oaiModel: 'gpt-realtime-whisper',
-        realtimePreview: tr.realtimePreview,
-        localPreview: useStore.getState().rec.localPreview,
-        metaKey: tr.metaKey,
-        keywords: buildKeywordList()
-      })
-    )
-    wsReady = true
-    for (const b of pending) ws.send(b)
-    pending.length = 0
-  }
-  ws.onmessage = (ev) => {
-    if (typeof ev.data !== 'string') return
-    const msg = JSON.parse(ev.data)
-    const store = useStore.getState()
-    if (msg.type === 'segment') {
-      // silence hallucination ("감사합니다" 류) — drop the chunk entirely (every engine passes here)
-      if (isWhisperHallucination(String(msg.text ?? ''))) {
-        bumpFinalizeStall()
-        return
+  // self-healing link: frames captured while the socket opens (or while it reconnects after a
+  // drop) are kept and replayed, so the server timeline never skips audio
+  const link = new SttLink({
+    config: buildSttConfig,
+    onState: (state, detail) => {
+      const store = useStore.getState()
+      if (state === 'reconnecting') store.setRec({ sttError: RECONNECT_MSG })
+      else {
+        if (store.rec.sttError === RECONNECT_MSG) store.setRec({ sttError: null })
+        if (detail) store.showToast(detail)
       }
-      // tag the chunk with the focused PDF's current page (page↔chunk sync). null when no PDF
-      // is open/focused. With 교안 자동 넘김 on, the page tracker infers the page from the chunk
-      // text FIRST (and may turn the viewer), so the tag is the inferred page, not a stale one.
-      const fid = store.focusedPdfId
-      const inferred = liveEngine()?.inferPage(String(msg.text ?? ''), store.rec.liveSegments.length) ?? null
-      const pdfPage = fid != null ? (inferred ?? store.currentPdfPage[fid] ?? null) : null
-      // offset by existing duration so appended takes get continuous timestamps
-      store.appendLiveSegment({
-        tStart: msg.tStart + baseOffset,
-        tEnd: msg.tEnd + baseOffset,
-        text: applyRuntime(msg.text),
-        pdfId: fid,
-        pdfPage
-      })
-      bumpFinalizeStall() // a segment arriving = transcription is making progress
-      // schedule correction for the chunk FOLLOW_DELAY behind the newest one, so it gets
-      // both preceding and the just-arrived following chunks as context.
-      const st2 = useStore.getState()
-      if (st2.rec.liveCorrect && st2.aiReady) {
-        const agent = st2.agents.find((a) => a.id === st2.activeAgentId)
-        scheduleCorrection(st2.rec.liveSegments.length - 1 - followDelay(), correctionSystemPrompt(agent))
-      }
-      void maybeAutoTitle() // auto-name the note once ~2min of transcript has accumulated
-      // live-lecture pipelines (안내 감지 · 실시간 튜터) get the chunk AFTER it is in the store
-      liveEngine()?.onFinalSegment(st2.rec.liveSegments.length - 1)
-    } else if (msg.type === 'partial') {
-      store.setRec({ partial: isWhisperHallucination(String(msg.text ?? '')) ? '' : msg.text })
-      liveEngine()?.onPartial(String(msg.text ?? ''))
-    } else if (msg.type === 'usage') {
-      // cloud billing basis (audio seconds sent per engine) → live ₩ cost text in the transcript header
-      const engine = String(msg.engine || 'meta')
-      store.setRec({
-        cloudUsage: {
-          ...store.rec.cloudUsage,
-          [engine]: { audioSec: Number(msg.audioSec) || 0, usdPerHour: Number(msg.usdPerHour) || 0.18, estimate: !!msg.estimate }
+    },
+    onMessage: (msg, offsetSec) => {
+      const store = useStore.getState()
+      if (msg.type === 'segment') {
+        // silence hallucination ("감사합니다" 류) — drop the chunk entirely (every engine passes here)
+        if (isWhisperHallucination(String(msg.text ?? ''))) {
+          bumpFinalizeStall()
+          return
         }
-      })
-      if (!store.fxUsdKrw) void window.api.fx.usdKrw().then((fx) => useStore.setState({ fxUsdKrw: fx })).catch(() => {})
-    } else if (msg.type === 'finalizing') {
-      store.setRec({ finalizeRemaining: Number(msg.remaining ?? 0) })
-      bumpFinalizeStall()
-    } else if (msg.type === 'status') {
-      store.setRec({ sttState: msg.state === 'ready' ? 'ready' : 'loading' })
-    } else if (msg.type === 'stopped') {
-      clearFinalizeStall()
-      const r = stoppedResolve
-      stoppedResolve = null
-      r?.()
-    } else if (msg.type === 'error') {
-      store.setRec({ sttError: msg.message })
+        // tag the chunk with the focused PDF's current page (page↔chunk sync). null when no PDF
+        // is open/focused. With 교안 자동 넘김 on, the page tracker infers the page from the chunk
+        // text FIRST (and may turn the viewer), so the tag is the inferred page, not a stale one.
+        const fid = store.focusedPdfId
+        const inferred = liveEngine()?.inferPage(String(msg.text ?? ''), store.rec.liveSegments.length) ?? null
+        const pdfPage = fid != null ? (inferred ?? store.currentPdfPage[fid] ?? null) : null
+        // offset by existing duration so appended takes get continuous timestamps
+        store.appendLiveSegment({
+          tStart: msg.tStart + offsetSec + baseOffset,
+          tEnd: msg.tEnd + offsetSec + baseOffset,
+          text: applyRuntime(msg.text),
+          pdfId: fid,
+          pdfPage
+        })
+        bumpFinalizeStall() // a segment arriving = transcription is making progress
+        // schedule correction for the chunk FOLLOW_DELAY behind the newest one, so it gets
+        // both preceding and the just-arrived following chunks as context.
+        const st2 = useStore.getState()
+        if (st2.rec.liveCorrect && st2.aiReady) {
+          const agent = st2.agents.find((a) => a.id === st2.activeAgentId)
+          scheduleCorrection(st2.rec.liveSegments.length - 1 - followDelay(), correctionSystemPrompt(agent))
+        }
+        void maybeAutoTitle() // auto-name the note once ~2min of transcript has accumulated
+        // live-lecture pipelines (안내 감지 · 실시간 튜터) get the chunk AFTER it is in the store
+        liveEngine()?.onFinalSegment(st2.rec.liveSegments.length - 1)
+      } else if (msg.type === 'partial') {
+        store.setRec({ partial: isWhisperHallucination(String(msg.text ?? '')) ? '' : msg.text })
+        liveEngine()?.onPartial(String(msg.text ?? ''))
+      } else if (msg.type === 'usage') {
+        // cloud billing basis (audio seconds sent per engine) → live ₩ cost text in the transcript header
+        const engine = String(msg.engine || 'meta')
+        store.setRec({
+          cloudUsage: {
+            ...store.rec.cloudUsage,
+            [engine]: { audioSec: Number(msg.audioSec) || 0, usdPerHour: Number(msg.usdPerHour) || 0.18, estimate: !!msg.estimate }
+          }
+        })
+        if (!store.fxUsdKrw) void window.api.fx.usdKrw().then((fx) => useStore.setState({ fxUsdKrw: fx })).catch(() => {})
+      } else if (msg.type === 'finalizing') {
+        store.setRec({ finalizeRemaining: Number(msg.remaining ?? 0) })
+        bumpFinalizeStall()
+      } else if (msg.type === 'status') {
+        store.setRec({ sttState: msg.state === 'ready' ? 'ready' : 'loading' })
+      } else if (msg.type === 'stopped') {
+        clearFinalizeStall()
+        const r = stoppedResolve
+        stoppedResolve = null
+        r?.()
+      } else if (msg.type === 'error') {
+        store.setRec({ sttError: msg.message })
+      }
     }
-  }
-  ws.onerror = () => useStore.getState().setRec({ sttError: 'STT 연결 오류' })
+  })
+  link.connect(sidecar.port)
 
   node.port.onmessage = (e) => {
     markFrame() // pipeline is alive (frames flow even while paused — we just drop them)
     if (pausedFlag) return // paused: drop frames so the transcription clock skips the pause
-    const buf = (e.data as Float32Array).buffer
-    if (wsReady && ws.readyState === WebSocket.OPEN) ws.send(buf)
-    else if (ws.readyState === WebSocket.CONNECTING) pending.push(buf)
+    link.sendAudio((e.data as Float32Array).buffer as ArrayBuffer)
   }
   // 48k file frames → on-disk PCM. Paused frames are dropped here too, so the file skips the
   // same interval as the transcript and the two timelines stay locked.
@@ -673,11 +681,7 @@ export async function startRecording(): Promise<void> {
   const append = { chain: Promise.resolve() as Promise<void> }
   // last cancel checkpoint before capture actually starts: tear down everything built so far
   if (cancelStart) {
-    try {
-      ws.close()
-    } catch {
-      /* ignore */
-    }
+    link.close()
     try {
       node.disconnect()
       sourceNode.disconnect()
@@ -705,7 +709,7 @@ export async function startRecording(): Promise<void> {
     useStore.getState().setRec({ elapsedSec: (Date.now() - startMs - pausedMs) / 1000 })
   }, 250)
 
-  session = { ws, ctx, source: sourceNode, node, fileCtx, fileSource, fileNode, stream, extra, takePath, append, timer, startMs, memoId: memo.id, base }
+  session = { link, ctx, source: sourceNode, node, fileCtx, fileSource, fileNode, stream, extra, takePath, append, timer, startMs, memoId: memo.id, base }
   correctQueue = []
   activeCorrections = 0
   scheduledIdx = -1
@@ -809,10 +813,18 @@ export async function importAudioFile(): Promise<void> {
         void (async () => {
           const r = useStore.getState().rec
           const tr = await window.api.settings.getTranscribe()
+          let wavPath: string
+          try {
+            // remote transcription: upload the WAV to the remote Mac first
+            wavPath = await window.api.stt.stageFile(picked!.wavPath)
+          } catch (e) {
+            done(() => reject(new Error(`맥미니로 파일을 보내지 못했어요: ${(e as Error).message}`)))
+            return
+          }
           ws.send(
             JSON.stringify({
               type: 'transcribe_file',
-              wavPath: picked!.wavPath,
+              wavPath,
               model: r.model,
               language: r.language,
               initialPrompt: buildInitialPrompt(),
@@ -900,28 +912,9 @@ export function resumeRecording(): void {
  * preview overlay mid-recording (the sidecar connects/disconnects accordingly). */
 export async function reconfigureSession(): Promise<void> {
   const s = session
-  if (!s || s.ws.readyState !== WebSocket.OPEN) return
-  const st = useStore.getState()
-  const vad = await window.api.settings.getVad()
-  const tr = await window.api.settings.getTranscribe()
+  if (!s || !s.link.isOpen) return
   try {
-    s.ws.send(
-      JSON.stringify({
-        type: 'config',
-        model: st.rec.model,
-        language: st.rec.language,
-        initialPrompt: buildInitialPrompt(),
-        silenceSec: vad.silenceSec,
-        maxSec: vad.maxSec,
-        engine: 'local',
-        apiKey: tr.apiKey,
-        oaiModel: 'gpt-realtime-whisper',
-        realtimePreview: tr.realtimePreview,
-        localPreview: st.rec.localPreview,
-        metaKey: tr.metaKey,
-        keywords: buildKeywordList()
-      })
-    )
+    s.link.sendJson(await buildSttConfig())
   } catch {
     /* ignore */
   }
@@ -978,24 +971,12 @@ export async function stopRecording(): Promise<void> {
   await new Promise<void>((resolve) => {
     stoppedResolve = resolve
     bumpFinalizeStall()
-    try {
-      if (s.ws.readyState === WebSocket.OPEN) s.ws.send(JSON.stringify({ type: 'stop' }))
-      else {
-        clearFinalizeStall()
-        stoppedResolve = null
-        resolve()
-      }
-    } catch {
-      clearFinalizeStall()
-      stoppedResolve = null
-      resolve()
-    }
+    // sent now if connected; if the link is reconnecting it is re-sent right after the replay, and
+    // the stall timer above bounds the wait if no server comes back at all
+    s.link.beginStop()
   })
-  try {
-    s.ws.close()
-  } catch {
-    /* ignore */
-  }
+  s.link.close()
+  if (useStore.getState().rec.sttError === RECONNECT_MSG) useStore.getState().setRec({ sttError: null })
 
   // flush corrections for the final chunks that never reached FOLLOW_DELAY (no following
   // chunks ever arrived), so the tail is corrected too — using whatever follows (maybe none).

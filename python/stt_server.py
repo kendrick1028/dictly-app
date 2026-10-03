@@ -1171,18 +1171,83 @@ async def do_refine(ws, msg, loop):
             loop.call_soon_threadsafe(q.put_nowait, {"type": "error", "message": str(e)})
 
     fut = loop.run_in_executor(None, run)
-    while True:
-        m = await q.get()
-        await ws.send(json.dumps(m))
-        if m["type"] in ("refine_done", "error"):
-            break
-    await fut
+    try:
+        while True:
+            m = await q.get()
+            await ws.send(json.dumps(m))
+            if m["type"] in ("refine_done", "error"):
+                break
+        await fut
+    finally:
+        # remote mode: files staged into the upload dir by the app are single-use
+        up = os.environ.get("DICTLY_UPLOAD_DIR")
+        path = msg.get("wavPath") or msg.get("path") or ""
+        if up and path and os.path.realpath(path).startswith(os.path.realpath(up) + os.sep):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+
+
+def _remote_housekeeping():
+    """Remote mode (the app launches this server over SSH on another Mac):
+    - DICTLY_PIDFILE: stop the previous instance of THIS server (pid it wrote itself) left behind
+      by a connection that died uncleanly, so two copies never hold the GPU/memory at once.
+    - DICTLY_EXIT_ON_STDIN_EOF: the SSH session is our lifeline. When the app quits or the
+      network drops, sshd closes our stdin and we exit instead of lingering on that Mac."""
+    pidfile = os.environ.get("DICTLY_PIDFILE")
+    if pidfile:
+        try:
+            old = int(open(pidfile).read().strip() or 0)
+            if old and old != os.getpid():
+                os.kill(old, 15)
+                for _ in range(30):  # up to 3 s for it to release the socket/GPU
+                    time.sleep(0.1)
+                    os.kill(old, 0)
+        except (OSError, ValueError):
+            pass
+        with open(pidfile, "w") as f:
+            f.write(str(os.getpid()))
+    if os.environ.get("DICTLY_EXIT_ON_STDIN_EOF") == "1":
+        import threading
+
+        def _watch():
+            try:
+                while sys.stdin.buffer.read(4096):
+                    pass
+            except Exception:  # noqa: BLE001
+                pass
+            if pidfile:
+                try:
+                    if open(pidfile).read().strip() == str(os.getpid()):
+                        os.remove(pidfile)
+                except OSError:
+                    pass
+            os._exit(0)
+
+        threading.Thread(target=_watch, name="stdin-eof", daemon=True).start()
 
 
 async def main():
-    async with websockets.serve(handle, "127.0.0.1", 0, max_size=None) as server:
-        port = server.sockets[0].getsockname()[1]
-        print(f"DICTLY_PORT {port}", flush=True)
+    _remote_housekeeping()
+    sock_path = os.environ.get("DICTLY_UNIX_SOCKET")
+    if sock_path:
+        # remote mode: unix socket only (no TCP port on the remote Mac, so no firewall prompt
+        # there); the app reaches it through an SSH -L forward
+        try:
+            os.unlink(sock_path)
+        except OSError:
+            pass
+        server_cm = websockets.unix_serve(handle, sock_path, max_size=None)
+    else:
+        server_cm = websockets.serve(handle, "127.0.0.1", 0, max_size=None)
+    async with server_cm as server:
+        if sock_path:
+            os.chmod(sock_path, 0o600)
+            print("DICTLY_PORT unix", flush=True)
+        else:
+            port = server.sockets[0].getsockname()[1]
+            print(f"DICTLY_PORT {port}", flush=True)
         # Preload models at STARTUP (in the background) so the FIRST recording starts instantly
         # with no download/load wait: finals model (turbo) + small live-preview model (base).
         # The sidecar is spawned when the app launches, so this warming happens before the user

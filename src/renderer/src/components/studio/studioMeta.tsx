@@ -21,7 +21,7 @@ export const STUDIO_KINDS: {
   { kind: 'flashcards', label: '플래시카드', Icon: Layers, tile: 'bg-amber-50', tint: 'text-amber-700' },
   { kind: 'table', label: '테이블', Icon: Table2, tile: 'bg-rose-50', tint: 'text-rose-700' },
   { kind: 'mnemonic', label: '암기노트', Icon: Brain, tile: 'bg-indigo-50', tint: 'text-indigo-700' },
-  { kind: 'live_tutor', label: '실시간 튜터', Icon: Headphones, tile: 'bg-orange-50', tint: 'text-orange-700', hidden: true }
+  { kind: 'live_tutor', label: '코파일럿', Icon: Headphones, tile: 'bg-orange-50', tint: 'text-orange-700', hidden: true }
 ]
 
 export function kindMeta(kind: StudioKind): (typeof STUDIO_KINDS)[number] {
