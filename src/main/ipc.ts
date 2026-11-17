@@ -35,7 +35,7 @@ import type { ApiUsageRow, SttLanguage, TranscribeModel } from '../shared/types'
 import { usdKrw } from './fx'
 
 function parseSttModel(v: string | null | undefined): TranscribeModel {
-  return v === 'large-v3' || v === 'live' || v === 'meta' ? v : 'turbo'
+  return v === 'large-v3' || v === 'live' || v === 'meta' || v === 'openai' ? v : 'turbo'
 }
 function parseFollowDelay(v: string | number | null | undefined): number {
   const n = Math.round(Number(v))
@@ -780,6 +780,12 @@ export function registerIpc(): void {
   // ---- Claude ----
   ipcMain.handle('claude:status', () => claudeStatus())
   ipcMain.handle('ai:status', async () => {
+    // one-time migration: the old ⚙ "실시간 미리보기 (OpenAI)" toggle actually sent ALL audio to OpenAI
+    // (finals included), so users who had it on become the explicit OpenAI transcription model
+    if (db.getSetting('realtimePreview') === 'on') {
+      db.setSetting('sttModel', 'openai')
+      db.setSetting('realtimePreview', 'off')
+    }
     const [claude, gpt, agy, claudeAcct] = await Promise.all([claudeStatus(), codexStatus(), agyStatus(), claudeAccount().catch(() => null)])
     return {
       claude: { installed: claude.installed, loggedIn: claude.installed, version: claude.version, account: claudeAcct },

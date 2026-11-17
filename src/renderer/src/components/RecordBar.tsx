@@ -20,7 +20,8 @@ const STT_MODELS: { id: TranscribeModel; label: string; sub: string }[] = [
   ...(window.api.app.platform === 'darwin' ? [{ id: 'live' as const, label: 'Live', sub: '말하는 도중 글자가 흐르고, 문장이 끝나면 확정돼요' }] : []),
   { id: 'turbo', label: 'turbo', sub: '문장 단위로 끊어서 빠르게 전사해요' },
   { id: 'large-v3', label: 'large-v3', sub: '가장 정확하지만 느려요 · 첫 사용 시 내려받아요' },
-  { id: 'meta', label: 'Meta', sub: '클라우드 실시간 · 용어 사전 반영 · 시간당 $0.18' }
+  { id: 'meta', label: 'Meta', sub: '클라우드 실시간 · 용어 사전 반영 · 시간당 $0.18' },
+  { id: 'openai', label: 'OpenAI', sub: '클라우드 실시간 · 말하는 도중 글자가 흘러요 · 시간당 약 $1.02' }
 ]
 const delayLabel = (n: number): string => (n === 0 ? '바로' : `뒤 ${n}개 청크`)
 
@@ -129,8 +130,7 @@ function Options(): JSX.Element {
   const setRec = useStore((s) => s.setRec)
   const aiReady = useStore((s) => s.aiReady)
   const openaiKeySet = useStore((s) => s.openaiKeySet)
-  const realtimePreview = useStore((s) => s.realtimePreview)
-  const setRealtimePreview = useStore((s) => s.setRealtimePreview)
+  const setConnectOpen = useStore((s) => s.setConnectOpen)
   const liveCorrect = useStore((s) => s.rec.liveCorrect)
   const correctFollowDelay = useStore((s) => s.rec.correctFollowDelay)
   const setCorrectFollowDelay = useStore((s) => s.setCorrectFollowDelay)
@@ -193,16 +193,6 @@ function Options(): JSX.Element {
       window.removeEventListener('resize', onResize)
     }
   }, [open])
-
-  const togglePreview = (on: boolean): void => {
-    // persist the setting FIRST, then reconfigure the live session (so the sidecar reads
-    // the new value) — otherwise toggling off mid-recording wouldn't disconnect realtime.
-    void (async () => {
-      await setRealtimePreview(on)
-      const r = useStore.getState().rec
-      if (r.isRecording || r.finalizing) await reconfigureSession()
-    })()
-  }
 
   const saveMetaKey = (): void => {
     if (!metaDraft.trim()) return
@@ -276,6 +266,26 @@ function Options(): JSX.Element {
                 </button>
               </div>
             )}
+            {sttModel === 'openai' && (
+              <div className="flex h-6 items-center gap-2 pb-1.5 pl-[30px] pr-2 text-[11px]">
+                {openaiKeySet ? (
+                  <span className="text-emerald-600">OpenAI API 키 저장됨</span>
+                ) : (
+                  <>
+                    <span className="text-amber-600">키가 없으면 로컬 turbo로 전사해요</span>
+                    <button
+                      onClick={() => {
+                        setOpen(false)
+                        setConnectOpen(true)
+                      }}
+                      className="text-subtle underline-offset-2 hover:underline"
+                    >
+                      연결에서 키 넣기 →
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
             {/* transcription language */}
             <ValueRow label="전사 언어">
               <ValueMenu
@@ -307,7 +317,7 @@ function Options(): JSX.Element {
                 />
               </ValueRow>
             )}
-            {sttModel !== 'live' && sttModel !== 'meta' && (
+            {sttModel !== 'live' && sttModel !== 'meta' && sttModel !== 'openai' && (
               <CheckRow
                 label="로컬 실시간 미리보기"
                 checked={localPreview}
@@ -315,13 +325,6 @@ function Options(): JSX.Element {
                 title="말하는 중 로컬(소형 모델) 미리보기. 끄면 GPU를 전부 확정 전사에 써서 느린 Mac에서 지연이 줄어듭니다."
               />
             )}
-            <CheckRow
-              label="실시간 미리보기 (OpenAI)"
-              checked={realtimePreview && openaiKeySet}
-              disabled={!openaiKeySet}
-              onChange={togglePreview}
-              title={openaiKeySet ? 'OpenAI Realtime으로 단어 단위 미리보기(전사 확정은 그대로)' : '상단 "연결"에서 OpenAI API 키를 넣으면 쓸 수 있어요'}
-            />
             <CheckRow
               label="종료 후 자동 정리"
               checked={structureOnStop && !!aiReady}

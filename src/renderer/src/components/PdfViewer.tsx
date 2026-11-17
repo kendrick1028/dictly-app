@@ -8,60 +8,9 @@ import { PdfAnnotationLayer } from './PdfAnnotationLayer'
 import { PdfAnnotationToolbar } from './PdfAnnotationToolbar'
 import { fmtClock } from '../lib/time'
 import { toggleAutoPageFollow } from '../live/liveLectureEngine'
-import type { PDFDocumentProxy } from '../pdf/pdfjs-setup'
+import { PdfPageBox, typicalPageSize } from '../pdf/PdfPageBox'
 
 const GAP = 12 // px between pages in the continuous scroll
-
-/** Renders one page to a canvas; cancels the render task on unmount (virtualization churn). */
-function PdfPageCanvas({
-  doc,
-  pageNum,
-  scale,
-  cssW,
-  cssH
-}: {
-  doc: PDFDocumentProxy
-  pageNum: number
-  scale: number
-  cssW: number
-  cssH: number
-}): JSX.Element {
-  const ref = useRef<HTMLCanvasElement>(null)
-  useEffect(() => {
-    let cancelled = false
-    let task: { cancel: () => void } | null = null
-    void (async () => {
-      try {
-        const page = await doc.getPage(pageNum)
-        if (cancelled) return
-        const canvas = ref.current
-        if (!canvas) return
-        const dpr = window.devicePixelRatio || 1
-        const viewport = page.getViewport({ scale: scale * dpr })
-        const ctx = canvas.getContext('2d')
-        if (!ctx) return
-        canvas.width = viewport.width
-        canvas.height = viewport.height
-        const rt = page.render({ canvasContext: ctx, viewport })
-        task = rt
-        await rt.promise
-      } catch {
-        /* RenderingCancelledException expected when scrolled out / rescaled */
-      }
-    })()
-    return () => {
-      cancelled = true
-      task?.cancel()
-    }
-  }, [doc, pageNum, scale])
-  return (
-    <canvas
-      ref={ref}
-      style={{ width: cssW, height: cssH }}
-      className="block rounded bg-white shadow-md ring-1 ring-black/5"
-    />
-  )
-}
 
 /** One PDF pane: light, continuous vertical scroll (virtualized), pinch/zoom, focus ring, and a
  *  per-page "녹음" dropdown (reverse sync) that seeks audio. */
@@ -114,16 +63,12 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
   const focused = focusedPdfId === pdfId
   const total = numPages || meta?.pageCount || 0
 
-  // page-1 size → uniform slot aspect (lecture PDFs are uniform; corrected per-canvas on render)
+  // uniform slot = the document's typical page (not page 1: a cover/spread is often wider). Each
+  // page is drawn at its own aspect inside the slot (PdfPageBox), never stretched to it.
   useEffect(() => {
     if (!doc) return
     let cancelled = false
-    void (async () => {
-      const p = await doc.getPage(1)
-      if (cancelled) return
-      const v = p.getViewport({ scale: 1 })
-      setUnit({ w: v.width, h: v.height })
-    })()
+    void typicalPageSize(doc).then((s) => !cancelled && setUnit(s))
     return () => {
       cancelled = true
     }
@@ -637,11 +582,16 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
           // one page at a time, centered; the page swaps with a short fade when it turns
           <div className="flex min-h-full items-center justify-center">
             <div key={currentPage} className="dictly-anim-in relative" style={{ width: pageW, height: pageH }}>
-              <PdfPageCanvas doc={doc} pageNum={currentPage} scale={renderScale} cssW={pageW} cssH={pageH} />
-              <PdfAnnotationLayer doc={doc} pdfId={pdfId} page={currentPage} pageW={pageW} pageH={pageH} />
-              {autoFlash && autoFlash.page === currentPage && (
-                <div key={autoFlash.at} className="dictly-autopage-flash pointer-events-none absolute inset-0 rounded ring-2 ring-emerald-400/70" />
-              )}
+              <PdfPageBox doc={doc} pageNum={currentPage} slot={unit} layoutScale={effScale} renderScale={renderScale}>
+                {(w, h) => (
+                  <>
+                    <PdfAnnotationLayer doc={doc} pdfId={pdfId} page={currentPage} pageW={w} pageH={h} />
+                    {autoFlash && autoFlash.page === currentPage && (
+                      <div key={autoFlash.at} className="dictly-autopage-flash pointer-events-none absolute inset-0 rounded ring-2 ring-emerald-400/70" />
+                    )}
+                  </>
+                )}
+              </PdfPageBox>
             </div>
           </div>
         )}
@@ -649,13 +599,18 @@ export function PdfViewer({ pdfId, showFocus = false }: { pdfId: number; showFoc
           <div style={{ position: 'relative', width: pageW, height: Math.max(0, total * rowH - GAP), margin: '0 auto' }}>
             {pages.map((i) => (
               <div key={i} style={{ position: 'absolute', top: (i - 1) * rowH, left: 0, width: pageW, height: pageH }}>
-                <PdfPageCanvas doc={doc} pageNum={i} scale={renderScale} cssW={pageW} cssH={pageH} />
-                <PdfAnnotationLayer doc={doc} pdfId={pdfId} page={i} pageW={pageW} pageH={pageH} />
-                {/* current page: soft accent frame + page badge so you always know where you are */}
-                {i === currentPage && <div className="pointer-events-none absolute inset-0 rounded ring-2 ring-accent/45 transition" />}
-                {autoFlash && autoFlash.page === i && (
-                  <div key={autoFlash.at} className="dictly-autopage-flash pointer-events-none absolute inset-0 rounded ring-2 ring-emerald-400/70" />
-                )}
+                <PdfPageBox doc={doc} pageNum={i} slot={unit} layoutScale={effScale} renderScale={renderScale}>
+                  {(w, h) => (
+                    <>
+                      <PdfAnnotationLayer doc={doc} pdfId={pdfId} page={i} pageW={w} pageH={h} />
+                      {/* current page: soft accent frame so you always know where you are */}
+                      {i === currentPage && <div className="pointer-events-none absolute inset-0 rounded ring-2 ring-accent/45 transition" />}
+                      {autoFlash && autoFlash.page === i && (
+                        <div key={autoFlash.at} className="dictly-autopage-flash pointer-events-none absolute inset-0 rounded ring-2 ring-emerald-400/70" />
+                      )}
+                    </>
+                  )}
+                </PdfPageBox>
               </div>
             ))}
           </div>

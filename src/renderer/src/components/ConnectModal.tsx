@@ -409,7 +409,7 @@ export function ConnectModal(): JSX.Element | null {
               modelPlaceholder="gemini-2.0-flash"
             />
             <p className="px-0.5 text-[11px] leading-relaxed text-subtle">
-              OpenAI 키는 실시간 전사(하단 ⚙)에도 함께 쓰여요. 사용한 만큼 각 제공사에 과금됩니다.
+              OpenAI 키는 녹음 옵션(⚙)의 전사 모델 "OpenAI"에도 함께 쓰여요. 사용한 만큼 각 제공사에 과금됩니다.
             </p>
           </div>
         )}

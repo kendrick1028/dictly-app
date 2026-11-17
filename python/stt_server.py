@@ -277,9 +277,42 @@ META_HTTP_URL = "https://api.meta.ai/v1/asr/transcribe"
 META_ROTATE_SEC = 55 * 60      # realtime sessions are capped at 60 min → rotate early
 META_MAX_KEYWORDS = 100
 META_USD_PER_HOUR = 0.18       # billed per whole second of audio processed
-# OpenAI transcription list price: gpt-4o-transcribe $0.006/min. Realtime transcription is billed by
-# audio tokens, so the same rate is used as an ESTIMATE (flagged to the client).
-OPENAI_USD_PER_HOUR = 0.36
+# OpenAI list prices per minute of audio: gpt-live-transcribe (realtime engine) $0.017/min = $1.02/h,
+# gpt-4o-transcribe (legacy batch engine) $0.006/min = $0.36/h, still flagged as an estimate.
+OPENAI_RT_USD_PER_HOUR = 1.02
+OPENAI_BATCH_USD_PER_HOUR = 0.36
+# OpenAI realtime transcription (cloud engine "OpenAI"): gpt-live-transcribe streams deltas while speaking.
+# Sessions expire after 60 min → rotate at a turn boundary from 55 min, force a cut at 58 min.
+OPENAI_RT_URL = "wss://api.openai.com/v1/realtime?intent=transcription"
+OPENAI_RT_MODEL = "gpt-live-transcribe"
+OPENAI_BATCH_MODEL = "gpt-4o-transcribe"  # REST /audio/transcriptions (legacy openai-transcribe engine only)
+OPENAI_ROTATE_SEC = 55 * 60
+OPENAI_ROTATE_HARD_SEC = 58 * 60
+
+
+def _oai_error_text(ev):
+    err = ev.get("error") if isinstance(ev, dict) else None
+    if isinstance(err, dict):
+        return err.get("message") or err.get("code") or str(err)[:200]
+    return str(ev)[:200]
+
+
+class _OaiAuthError(RuntimeError):
+    """OpenAI rejected the API key: retrying can't help"""
+
+
+def _oai_check_auth(ev):
+    err = ev.get("error") if isinstance(ev, dict) else None
+    if isinstance(err, dict) and (err.get("code") == "invalid_api_key" or "api key" in str(err.get("message", "")).lower()):
+        raise _OaiAuthError(_oai_error_text(ev))
+
+
+def _oai_auth_failed(e):
+    """bad / revoked key: an error event right after connecting, or HTTP 401/403 on the upgrade"""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    return isinstance(e, _OaiAuthError) or status in (401, 403)
+
+
 META_LANG_NAMES = {
     "ko": "Korean", "en": "English", "ja": "Japanese", "zh": "Mandarin Chinese", "fr": "French",
     "de": "German", "es": "Spanish", "it": "Italian", "pt": "Portuguese", "nl": "Dutch", "ru": None,
@@ -368,127 +401,406 @@ async def handle(ws, *_):
         "maxSec": MAX_SEG_SEC,
         "engine": "local",  # local | openai-transcribe | openai-realtime
         "apiKey": "",
-        "oaiModel": "gpt-4o-transcribe",
-        "realtimePreview": False,  # overlay: live preview via Realtime, finals stay on the chosen engine
+        "oaiModel": OPENAI_RT_MODEL,  # realtime engine model (the session always opens gpt-live-transcribe)
+        "realtimePreview": False,  # legacy key from the removed preview toggle (ignored)
         "localPreview": True,  # local (base-model) live preview; off → finals get 100% of the GPU
         "metaKey": "",         # Meta Model API key (cfg["model"] == "meta" → Muse Voice Transcribe)
         "keywords": [],        # glossary terms → Meta `keywords` vocabulary biasing
     }
     loop = asyncio.get_event_loop()
-    # OpenAI Realtime session state. When connected, Realtime produces BOTH the live
-    # preview and the final sentence segments (local whisper is skipped → no double work).
-    # clock = input samples streamed (= elapsed audio time, matches the recording timeline).
-    # "closing" distinguishes a session WE tore down (toggle-off / stop) from one OpenAI
-    # dropped on its own (Realtime transcription is capped ~30 min) — only the latter
-    # triggers the local-Whisper fallback below.
-    oai = {"ws": None, "task": None, "clock": 0, "start": 0.0, "acc": "", "closing": False,
-           "reported": 0, "batch_sec": 0.0, "batch_reported": 0.0}
+    # OPENAI REALTIME (cfg["engine"] == "openai-realtime", model gpt-live-transcribe): owns the whole stream
+    # while "mode" is on. The model has no server VAD, so the client cuts turns (adaptive RMS VAD below,
+    # same tuning as the iOS engine) with input_audio_buffer.commit. Each commit's (t0, t1) goes into the
+    # session's FIFO and is bound to the item_id that input_audio_buffer.committed announces; deltas
+    # (keyed by that item_id, they arrive before the commit) are the live preview, and each item's
+    # `completed` transcript becomes one final segment. "buf" keeps the audio since the last commit so a
+    # dropped session can be reopened without losing the open turn; turns cut while disconnected wait in
+    # "deferred". clock = samples received (= the recording timeline), sent = samples billed by OpenAI.
+    oai = {"mode": False, "cur": None, "conns": [], "connecting": None, "closing": False, "gen": 0,
+           "fails": 0, "next_try": 0.0, "no_prompt": False,
+           "clock": 0, "buf": [], "buf_samples": 0, "buf_start": 0, "deferred": [],
+           "floor": 0.002, "speaking": False, "sil": 0.0, "turn_start": 0, "last_voice": 0,
+           "sent": 0, "reported": 0, "batch_sec": 0.0, "batch_reported": 0.0}
 
     async def oai_report_usage(force=False):
         """Usage of the OpenAI cloud paths (realtime stream + batch chunks) for the live cost display."""
         try:
-            if oai["clock"] and (force or oai["clock"] - oai["reported"] >= SAMPLE_RATE):
-                oai["reported"] = oai["clock"]
-                await ws.send(json.dumps({"type": "usage", "engine": "openai-realtime", "audioSec": oai["clock"] / SAMPLE_RATE,
-                                          "usdPerHour": OPENAI_USD_PER_HOUR, "estimate": True}))
+            if oai["sent"] and (force or oai["sent"] - oai["reported"] >= SAMPLE_RATE):
+                oai["reported"] = oai["sent"]
+                await ws.send(json.dumps({"type": "usage", "engine": "openai-realtime", "audioSec": oai["sent"] / SAMPLE_RATE,
+                                          "usdPerHour": OPENAI_RT_USD_PER_HOUR, "estimate": False}))
             if oai["batch_sec"] and (force or oai["batch_sec"] - oai["batch_reported"] >= 1.0):
                 oai["batch_reported"] = oai["batch_sec"]
                 await ws.send(json.dumps({"type": "usage", "engine": "openai-transcribe", "audioSec": oai["batch_sec"],
-                                          "usdPerHour": OPENAI_USD_PER_HOUR, "estimate": True}))
+                                          "usdPerHour": OPENAI_BATCH_USD_PER_HOUR, "estimate": True}))
         except Exception:  # noqa: BLE001
             pass
 
-    async def connect_realtime():
-        # GA Realtime API (no beta header; nested session.audio.input shape)
-        conn = await websockets.connect(
-            "wss://api.openai.com/v1/realtime?intent=transcription",
-            additional_headers={"Authorization": f"Bearer {cfg['apiKey']}"},
-            max_size=None,
-            ping_interval=20,
-        )
-        await conn.send(json.dumps({
-            "type": "session.update",
-            "session": {
-                "type": "transcription",
-                "audio": {
-                    "input": {
-                        "format": {"type": "audio/pcm", "rate": 24000},
-                        # gpt-realtime-whisper streams continuously and rejects turn_detection
-                        "transcription": {"model": cfg.get("oaiModel") or "gpt-realtime-whisper",
-                                          **({"language": cfg["language"]} if _lang(cfg["language"]) else {})},
-                    }
-                },
-            },
-        }))
-        return conn
+    def _oai_append(audio):
+        return json.dumps({"type": "input_audio_buffer.append", "audio": _pcm16_b64(_resample(audio, SAMPLE_RATE, 24000))})
 
-    async def emit_finals(sentences):
-        """Emit each sentence as a final segment, timestamps spread over [start, now]."""
-        sentences = [s.strip() for s in sentences if s.strip()]
-        if not sentences:
+    async def oai_connect():
+        """GA transcription session. No OpenAI-Beta header: with it the server answers in the old beta protocol."""
+        conn = await websockets.connect(
+            OPENAI_RT_URL,
+            additional_headers={"Authorization": f"Bearer {cfg['apiKey']}"},
+            max_size=None, ping_interval=20, open_timeout=15, close_timeout=1,
+        )
+        try:
+            first = json.loads(await asyncio.wait_for(conn.recv(), 15))
+            if first.get("type") != "session.created":
+                _oai_check_auth(first)
+                raise RuntimeError(_oai_error_text(first))
+            tr = {"model": OPENAI_RT_MODEL, "delay": "low"}
+            if _lang(cfg["language"]):
+                tr["languages"] = [cfg["language"]]  # array field: the singular `language` is rejected
+            prompt = (cfg.get("initialPrompt") or "").strip()
+            if prompt and not oai["no_prompt"]:
+                tr["prompt"] = prompt[:1000]  # the glossary, same text local Whisper gets as initial_prompt
+            await conn.send(json.dumps({"type": "session.update", "session": {"type": "transcription", "audio": {"input": {
+                "format": {"type": "audio/pcm", "rate": 24000},
+                "transcription": tr,
+                "turn_detection": None,  # unsupported by this model: the client commits turns
+            }}}}))
+            while True:
+                ev = json.loads(await asyncio.wait_for(conn.recv(), 15))
+                if ev.get("type") == "session.updated":
+                    got = (((ev.get("session") or {}).get("audio") or {}).get("input") or {}).get("transcription") or {}
+                    print(f"[stt] openai session ready: model={got.get('model')} languages={got.get('languages')} "
+                          f"prompt={'yes' if got.get('prompt') else 'no'}", flush=True)
+                    if got.get("model") != OPENAI_RT_MODEL:
+                        # never transcribe silently on a different model than the one asked for
+                        raise RuntimeError(f"OpenAI가 {got.get('model')} 모델로 세션을 열었습니다({OPENAI_RT_MODEL} 요청)")
+                    break
+                if ev.get("type") == "error":
+                    msg = _oai_error_text(ev)
+                    if "prompt" in msg.lower() and "prompt" in tr:
+                        oai["no_prompt"] = True  # retried without the glossary on the next attempt
+                    raise RuntimeError(msg)
+            return conn, float(first.get("session", {}).get("expires_at") or 0)
+        except BaseException:
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            raise
+
+    def oai_pending(cs):
+        """turns committed to this session whose transcript hasn't arrived yet"""
+        return bool(cs["fifo"]) or any(not it["done"] and "t0" in it for it in cs["items"].values())
+
+    def oai_open_text(cs):
+        """the uncommitted buffer already produced preview text (speech the RMS VAD missed)"""
+        if cs is None:
+            return False
+        undone = [i for i in cs["order"] if not cs["items"][i]["done"] and "t0" not in cs["items"][i]]
+        return any(cs["items"][i]["text"].strip() for i in undone[len(cs["fifo"]):])
+
+    async def oai_emit(it, text):
+        if not text:
             return
         now = oai["clock"] / SAMPLE_RATE
-        per = max(0.0, now - oai["start"]) / len(sentences)
-        for i, s in enumerate(sentences):
-            await ws.send(json.dumps({
-                "type": "segment",
-                "tStart": oai["start"] + per * i,
-                "tEnd": oai["start"] + per * (i + 1),
-                "text": _clean(s),
-                "final": True,
-            }))
-        oai["start"] = now
+        t0 = float(it.get("t0", max(0.0, now - 1.0)))
+        t1 = float(it.get("t1", now))
+        await ws.send(json.dumps({"type": "segment", "tStart": t0, "tEnd": max(t0, t1), "text": text, "final": True}))
 
-    async def relay_realtime():
-        nonlocal sample_offset, last_partial_off
+    async def oai_partial(cs):
+        txt = " ".join(cs["items"][i]["text"].strip() for i in cs["order"]
+                       if not cs["items"][i]["done"] and cs["items"][i]["text"].strip())
+        await ws.send(json.dumps({"type": "partial", "text": _tail_sentences(txt, 3) if txt else ""}))
+
+    async def oai_relay(cs):
+        conn = cs["ws"]
         try:
-            async for raw in oai["ws"]:
+            async for raw in conn:
                 ev = json.loads(raw)
                 t = ev.get("type", "")
-                if t.endswith("transcription.delta"):
-                    oai["acc"] += ev.get("delta", "")
-                    sents = _split_sentences(oai["acc"])
-                    if len(sents) >= 2:
-                        # gpt-realtime-whisper sends no completed event → finalize sentences
-                        # ourselves: all but the last (in-progress) sentence are confirmed.
-                        await emit_finals(sents[:-1])
-                        oai["acc"] = sents[-1]
-                    elif len(oai["acc"]) > 220:
-                        await emit_finals([oai["acc"]])  # no punctuation yet but getting long
-                        oai["acc"] = ""
-                    await ws.send(json.dumps({"type": "partial", "text": _tail_sentences(oai["acc"], 2)}))
-                elif t.endswith("transcription.completed"):
-                    # if the model DOES send completed, finalize whatever's still pending
-                    if oai["acc"].strip():
-                        await emit_finals(_split_sentences(oai["acc"]))
-                        oai["acc"] = ""
+                if t == "conversation.item.input_audio_transcription.delta":
+                    iid = ev.get("item_id") or "?"
+                    it = cs["items"].get(iid)
+                    if it is None:
+                        it = cs["items"][iid] = {"text": "", "done": False}
+                        cs["order"].append(iid)
+                    it["text"] += ev.get("delta") or ""
+                    await oai_partial(cs)
+                elif t == "input_audio_buffer.committed":
+                    iid = ev.get("item_id") or "?"
+                    it = cs["items"].get(iid)
+                    if it is None:
+                        it = cs["items"][iid] = {"text": "", "done": False}
+                        cs["order"].append(iid)
+                    now = oai["clock"] / SAMPLE_RATE
+                    it["t0"], it["t1"] = cs["fifo"].pop(0) if cs["fifo"] else (max(0.0, now - 1.0), now)
+                elif t in ("conversation.item.input_audio_transcription.completed",
+                           "conversation.item.input_audio_transcription.failed"):
+                    iid = ev.get("item_id") or "?"
+                    it = cs["items"].pop(iid, None) or {"text": "", "done": False}
+                    if iid in cs["order"]:
+                        cs["order"].remove(iid)
+                    it["done"] = True
+                    if t.endswith("completed"):
+                        oai["fails"] = 0  # the session is doing real work → reset the reconnect budget
+                        await oai_emit(it, _clean(ev.get("transcript") or ""))
+                    else:
+                        print(f"[stt] openai item failed: {str(ev.get('error'))[:200]}", flush=True)
+                        await oai_emit(it, _clean(it["text"]))  # keep what streamed in
+                    await oai_partial(cs)
                 elif t == "error":
-                    await ws.send(json.dumps({"type": "error", "message": str(ev.get("error", "realtime error"))}))
-        except Exception:  # noqa: BLE001
-            pass
-        # The async-for ended. If WE didn't close it (toggle-off / stop), OpenAI dropped
-        # the session — Realtime transcription is capped (~30 min). Flush pending text and
-        # fall back to LOCAL whisper so recording keeps working: the binary loop skips the
-        # local VAD entirely while oai["ws"] is set, so leaving it set would silently kill
-        # ALL transcription (the "30분쯤 멈춤" bug).
-        if oai.get("closing"):
+                    err = ev.get("error") or {}
+                    if err.get("code") == "input_audio_buffer_commit_empty":
+                        if cs["fifo"]:
+                            cs["fifo"].pop(0)  # that commit produced no item
+                    else:
+                        print(f"[stt] openai error: {str(err)[:300]}", flush=True)
+                        await ws.send(json.dumps({"type": "error", "message": f"OpenAI 전사 오류: {_oai_error_text(ev)}"}))
+        except Exception as e:  # noqa: BLE001
+            print(f"[stt] openai relay ended: {e!r}", flush=True)
+        if cs in oai["conns"]:
+            oai["conns"].remove(cs)
+        # committed turns that never got their transcript: keep the text that streamed in. The still-open
+        # turn (no commit yet) is skipped: its audio is in buf and is resent to the next session.
+        fifo = list(cs["fifo"])
+        for iid in list(cs["order"]):
+            it = cs["items"][iid]
+            if it["done"]:
+                continue
+            if "t0" not in it:
+                if not fifo:
+                    continue
+                it["t0"], it["t1"] = fifo.pop(0)
+            it["done"] = True
+            try:
+                await oai_emit(it, _clean(it["text"]))
+            except Exception:  # noqa: BLE001
+                pass
+        if cs["retired"] or oai["closing"] or oai["cur"] is not cs:
+            return
+        # dropped by OpenAI while it was the live session → reopen (lazily, from the audio loop)
+        oai["cur"] = None
+        oai["fails"] += 1
+        oai["next_try"] = time.time() + min(8.0, 2.0 ** (oai["fails"] - 1))
+        print(f"[stt] openai session dropped (code={getattr(conn, 'close_code', None)} "
+              f"reason={getattr(conn, 'close_reason', '')!r}) fails={oai['fails']}", flush=True)
+        if oai["fails"] >= 4:
+            await oai_fallback("OpenAI 실시간 연결이 반복해서 끊겨 로컬 Whisper(turbo)로 전환했습니다. 전사는 계속됩니다.")
+
+    async def oai_open():
+        conn, expires = await oai_connect()
+        if oai["closing"] or not oai["mode"]:
+            try:
+                await conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            return
+        oai["gen"] += 1
+        cs = {"ws": conn, "gen": oai["gen"], "fifo": [], "items": {}, "order": [], "lock": asyncio.Lock(),
+              "opened": time.time(), "expires": expires, "retired": False}
+        oai["conns"].append(cs)
+        cs["task"] = asyncio.create_task(oai_relay(cs))
+        deferred, oai["deferred"] = oai["deferred"], []
+        head = np.concatenate(oai["buf"]).astype(np.float32) if oai["buf"] else None
+        # from here new frames go straight to this session; the backlog below is sent first because the
+        # lock is taken before anything can yield (asyncio.Lock is FIFO)
+        oai["cur"] = cs
+        async with cs["lock"]:
+            try:
+                for audio, t0, t1 in deferred:  # turns cut while we were disconnected
+                    await conn.send(_oai_append(audio))
+                    cs["fifo"].append((t0, t1))  # before the commit: its ack may come back on the next tick
+                    await conn.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                    oai["sent"] += len(audio)
+                if head is not None and len(head):
+                    await conn.send(_oai_append(head))  # the open turn (and its pre-roll)
+                    oai["sent"] += len(head)
+            except Exception:  # noqa: BLE001
+                pass  # the relay notices the dead socket and reopens
+
+    async def oai_open_bg():
+        try:
+            await oai_open()
+        except Exception as e:  # noqa: BLE001
+            oai["fails"] += 1
+            oai["next_try"] = time.time() + min(8.0, 2.0 ** (oai["fails"] - 1))
+            print(f"[stt] openai connect failed: {e!r}", flush=True)
+            if _oai_auth_failed(e):
+                await oai_fallback("OpenAI가 API 키를 거부했습니다. 로컬 Whisper(turbo)로 전사합니다. 연결에서 키를 확인하세요.")
+            elif oai["fails"] >= 4:
+                await oai_fallback(f"OpenAI 연결 실패({str(e)[:80]}). 로컬 Whisper(turbo)로 전환했습니다.")
+        finally:
+            oai["connecting"] = None
+
+    async def oai_send_frame(arr):
+        cs = oai["cur"]
+        if cs is None:
             return
         try:
-            if oai["acc"].strip():
-                await emit_finals(_split_sentences(oai["acc"]))
+            async with cs["lock"]:
+                await cs["ws"].send(_oai_append(arr))
+            oai["sent"] += len(arr)
+        except Exception:  # noqa: BLE001
+            pass  # dropped: the relay reopens and resends buf
+
+    async def oai_retire(cs, wait=5.0):
+        """deliver this session's outstanding transcripts, then close it"""
+        deadline = time.time() + wait
+        while time.time() < deadline and oai_pending(cs) and cs in oai["conns"]:
+            await asyncio.sleep(0.1)
+        cs["retired"] = True
+        try:
+            await cs["ws"].close()
         except Exception:  # noqa: BLE001
             pass
-        oai["acc"] = ""
-        # resume the local timeline where realtime left off — the local-VAD path never
-        # advanced sample_offset while realtime owned the stream (it only bumped oai["clock"]).
+
+    async def oai_commit(t0, t1):
+        """cut the current turn: its transcript arrives as one final segment"""
+        cs = oai["cur"]
+        chunks = oai["buf"]
+        oai["buf"], oai["buf_samples"], oai["buf_start"] = [], 0, oai["clock"]
+        oai["speaking"], oai["sil"] = False, 0.0
+        if cs is None:
+            # disconnected: keep the turn for the next session (bounded; the fallback hands it to local Whisper)
+            if chunks:
+                oai["deferred"].append((np.concatenate(chunks).astype(np.float32), t0, t1))
+            while sum(len(a) for a, _, _ in oai["deferred"]) > 120 * SAMPLE_RATE and len(oai["deferred"]) > 1:
+                oai["deferred"].pop(0)
+            return
+        cs["fifo"].append((t0, t1))
+        try:
+            async with cs["lock"]:
+                await cs["ws"].send(json.dumps({"type": "input_audio_buffer.commit"}))
+        except Exception:  # noqa: BLE001
+            pass
+        # sessions expire after 60 min → rotate at this turn boundary once it's old enough
+        if time.time() - cs["opened"] >= OPENAI_ROTATE_SEC and oai["connecting"] is None and not oai["closing"]:
+            print("[stt] openai session rotation", flush=True)
+            oai["cur"] = None  # frames buffer in buf until the new session takes over
+            asyncio.create_task(oai_retire(cs, wait=15.0))
+            oai["connecting"] = asyncio.create_task(oai_open_bg())
+
+    async def oai_feed(arr):
+        """binary frame while OpenAI owns the stream: forward it + client-side turn detection"""
+        n = len(arr)
+        at = oai["clock"]
+        oai["clock"] += n
+        oai["buf"].append(arr)
+        oai["buf_samples"] += n
+        if oai["cur"] is not None:
+            await oai_send_frame(arr)
+        elif oai["connecting"] is None and not oai["closing"] and time.time() >= oai["next_try"]:
+            oai["connecting"] = asyncio.create_task(oai_open_bg())
+        rms = float(np.sqrt(np.mean(arr * arr)))
+        thresh = max(0.0035, oai["floor"] * 2.5)
+        if not oai["speaking"]:
+            oai["floor"] = min(0.01, max(0.0015, oai["floor"] * 0.97 + rms * 0.03))
+            if rms >= thresh:
+                oai["speaking"], oai["sil"] = True, 0.0
+                oai["turn_start"] = max(oai["buf_start"], at - int(PRE_ROLL_SEC * SAMPLE_RATE))
+                oai["last_voice"] = oai["clock"]
+            elif oai["clock"] - oai["buf_start"] >= max(15.0, cfg["maxSec"]) * SAMPLE_RATE:
+                # long silence: don't let it pile up in the session buffer. If the model heard speech the
+                # VAD missed (preview text exists), commit it as a turn; otherwise just drop the buffer.
+                if oai_open_text(oai["cur"]):
+                    await oai_commit(oai["buf_start"] / SAMPLE_RATE, oai["clock"] / SAMPLE_RATE)
+                else:
+                    oai["buf"], oai["buf_samples"], oai["buf_start"] = [], 0, oai["clock"]
+                    cs = oai["cur"]
+                    if cs is not None:
+                        try:
+                            async with cs["lock"]:
+                                await cs["ws"].send(json.dumps({"type": "input_audio_buffer.clear"}))
+                        except Exception:  # noqa: BLE001
+                            pass
+        else:
+            if rms < thresh * 0.8:
+                oai["sil"] += n / SAMPLE_RATE
+            else:
+                oai["sil"] = 0.0
+                oai["last_voice"] = oai["clock"]
+            long_turn = oai["clock"] - oai["turn_start"] >= cfg["maxSec"] * SAMPLE_RATE
+            cs = oai["cur"]
+            expiring = cs is not None and time.time() - cs["opened"] >= OPENAI_ROTATE_HARD_SEC
+            if oai["sil"] >= cfg["silenceSec"] or long_turn or expiring:
+                t1 = min(oai["clock"], oai["last_voice"] + int(0.25 * SAMPLE_RATE))
+                await oai_commit(oai["turn_start"] / SAMPLE_RATE, t1 / SAMPLE_RATE)
+        await oai_report_usage()
+
+    async def oai_start():
+        oai.update(mode=True, closing=False, fails=0, next_try=0.0, no_prompt=False, clock=sample_offset,
+                   buf=[], buf_samples=0, buf_start=sample_offset, deferred=[], speaking=False, sil=0.0)
+        try:
+            await oai_open()
+        except Exception as e:  # noqa: BLE001
+            print(f"[stt] openai connect failed: {e!r}", flush=True)
+            if _oai_auth_failed(e):
+                await oai_fallback("OpenAI가 API 키를 거부했습니다. 로컬 Whisper(turbo)로 전사합니다. 연결에서 키를 확인하세요.")
+            else:
+                oai["fails"] = 1  # retried lazily from the audio loop; 4 failures → local fallback
+                oai["next_try"] = time.time() + 1.0
+
+    async def oai_stop():
+        """recording stopped: close the open turn, wait for every outstanding transcript, then close"""
+        if oai["speaking"]:
+            await oai_commit(oai["turn_start"] / SAMPLE_RATE, oai["clock"] / SAMPLE_RATE)
+        elif oai["buf_samples"] >= MIN_SEG_SEC * SAMPLE_RATE and oai_open_text(oai["cur"]):
+            await oai_commit(oai["buf_start"] / SAMPLE_RATE, oai["clock"] / SAMPLE_RATE)
+        if oai["cur"] is None and oai["deferred"]:
+            if oai["connecting"] is None:
+                oai["connecting"] = asyncio.create_task(oai_open_bg())
+            try:
+                await asyncio.wait_for(asyncio.shield(oai["connecting"]), 10)
+            except Exception:  # noqa: BLE001
+                pass
+        conns = list(oai["conns"])
+        await asyncio.gather(*(oai_retire(cs, wait=6.0) for cs in conns), return_exceptions=True)
+        await asyncio.gather(*(cs["task"] for cs in conns), return_exceptions=True)  # relay flushes leftovers
+        oai["mode"], oai["closing"], oai["cur"] = False, True, None
+        leftover, oai["deferred"] = oai["deferred"], []
+        for audio, t0, t1 in leftover:  # never reached OpenAI (offline at stop) → local Whisper
+            utt_queue.put_nowait(("final", audio, t0, t1))
+        if leftover:
+            await utt_queue.join()
+
+    async def oai_shutdown():
+        """engine switched away mid-recording: hand the stream back to the local path"""
+        nonlocal sample_offset, last_partial_off
+        if oai["speaking"]:
+            await oai_commit(oai["turn_start"] / SAMPLE_RATE, oai["clock"] / SAMPLE_RATE)
+        oai["mode"], oai["closing"], oai["cur"] = False, True, None
+        if oai["connecting"] is not None:
+            oai["connecting"].cancel()
+        for cs in list(oai["conns"]):
+            asyncio.create_task(oai_retire(cs))
+        for audio, t0, t1 in oai["deferred"]:
+            utt_queue.put_nowait(("final", audio, t0, t1))
+        oai["deferred"], oai["buf"], oai["buf_samples"] = [], [], 0
         sample_offset = oai["clock"]
         last_partial_off = oai["clock"]
-        oai["ws"], oai["task"] = None, None
+
+    async def oai_fallback(message):
+        """give up on OpenAI for this session: local Whisper (turbo) takes over the same timeline"""
+        nonlocal sample_offset, last_partial_off
+        if not oai["mode"]:
+            return
+        oai["mode"], oai["closing"], oai["cur"] = False, True, None
+        for cs in list(oai["conns"]):
+            cs["retired"] = True
+            try:
+                await cs["ws"].close()
+            except Exception:  # noqa: BLE001
+                pass
+        # turns OpenAI never transcribed (cut while disconnected + the one being spoken) → local Whisper
+        for audio, t0, t1 in oai["deferred"]:
+            utt_queue.put_nowait(("final", audio, t0, t1))
+        if oai["speaking"] and oai["buf"]:
+            utt_queue.put_nowait(("final", np.concatenate(oai["buf"]).astype(np.float32),
+                                  oai["buf_start"] / SAMPLE_RATE, oai["clock"] / SAMPLE_RATE))
+        oai["deferred"], oai["buf"], oai["buf_samples"], oai["speaking"] = [], [], 0, False
+        cfg["engine"] = "local"
+        sample_offset = oai["clock"]
+        last_partial_off = oai["clock"]
         try:
-            await ws.send(json.dumps({
-                "type": "error",
-                "message": "OpenAI 실시간 세션이 만료되어(약 30분 제한) 로컬 Whisper로 자동 전환했습니다 — 전사는 계속됩니다.",
-            }))
+            await loop.run_in_executor(None, get_model, cfg["model"] if cfg["model"] not in ("live", "meta") else "turbo")
+            await ws.send(json.dumps({"type": "error", "message": message}))
         except Exception:  # noqa: BLE001
             pass
 
@@ -709,7 +1021,7 @@ async def handle(ws, *_):
         try:
             if cloud:
                 text = await loop.run_in_executor(
-                    None, _openai_transcribe, audio, cfg["language"], cfg["apiKey"], cfg.get("oaiModel")
+                    None, _openai_transcribe, audio, cfg["language"], cfg["apiKey"], OPENAI_BATCH_MODEL
                 )
                 oai["batch_sec"] += len(audio) / SAMPLE_RATE
                 await oai_report_usage()
@@ -798,25 +1110,19 @@ async def handle(ws, *_):
                     cfg["maxSec"] = max(5.0, min(40.0, float(msg.get("maxSec", MAX_SEG_SEC))))
                     await ws.send(json.dumps({"type": "status", "state": "loading"}))
                     try:
-                        # Realtime is used as the finals engine OR a live-preview overlay.
-                        # Toggle-aware so a re-sent config (mid-recording) connects/disconnects it.
-                        want_rt = bool(cfg["apiKey"]) and (cfg["engine"] == "openai-realtime" or cfg.get("realtimePreview"))
-                        have_rt = oai["ws"] is not None
-                        if want_rt and not have_rt:
-                            oai["start"] = oai["clock"] / SAMPLE_RATE
-                            oai["acc"] = ""
-                            oai["closing"] = False
-                            oai["ws"] = await connect_realtime()
-                            oai["task"] = asyncio.create_task(relay_realtime())
-                        elif not want_rt and have_rt:
-                            oai["closing"] = True
-                            try:
-                                await oai["ws"].close()
-                            except Exception:  # noqa: BLE001
-                                pass
-                            if oai["task"]:
-                                oai["task"].cancel()
-                            oai["ws"], oai["task"] = None, None
+                        # OpenAI realtime owns the stream (preview + finals) while selected. Toggle-aware
+                        # so a re-sent config (mid-recording) starts it or hands the stream back.
+                        want_rt = cfg["engine"] == "openai-realtime"
+                        if want_rt and not cfg.get("apiKey"):
+                            await ws.send(json.dumps({"type": "error",
+                                                      "message": "OpenAI API 키가 없어 로컬 Whisper(turbo)로 전사합니다. 상단 연결에서 키를 넣으세요."}))
+                            cfg["engine"] = "local"
+                            want_rt = False
+                        if want_rt and not oai["mode"]:
+                            await oai_start()  # may fall back (cfg["engine"] → local) on a rejected key
+                            want_rt = oai["mode"]
+                        elif not want_rt and oai["mode"]:
+                            await oai_shutdown()
                         if cfg["model"] == "meta" and not cfg.get("metaKey"):
                             await ws.send(json.dumps({"type": "error",
                                                       "message": "Meta API 키가 없어 로컬 Whisper(turbo)로 전사합니다 — 녹음 옵션(⚙)에서 키를 저장하세요."}))
@@ -856,29 +1162,17 @@ async def handle(ws, *_):
                         await ws.send(json.dumps({"type": "error", "message": f"엔진 초기화 실패: {e}"}))
                     await ws.send(json.dumps({"type": "status", "state": "ready"}))
                 elif mt == "flush":
-                    if live["session"] is not None:
+                    if oai["mode"]:
+                        if oai["speaking"]:
+                            await oai_commit(oai["turn_start"] / SAMPLE_RATE, oai["clock"] / SAMPLE_RATE)
+                    elif live["session"] is not None:
                         live["session"].flush()
                     else:
                         enqueue()
                 elif mt == "stop":
-                    if oai["ws"] is not None:
-                        # flush the last in-progress utterance as a final segment
-                        full = _clean(oai["acc"].strip())
-                        if full:
-                            t1 = oai["clock"] / SAMPLE_RATE
-                            sents = _split_sentences(full)
-                            per = max(0.0, t1 - oai["start"]) / len(sents) if sents else 0.0
-                            for i, s in enumerate(sents):
-                                await ws.send(json.dumps({
-                                    "type": "segment", "tStart": oai["start"] + per * i,
-                                    "tEnd": oai["start"] + per * (i + 1), "text": s, "final": True,
-                                }))
-                            oai["acc"] = ""
-                        oai["closing"] = True
-                        try:
-                            await oai["ws"].close()
-                        except Exception:  # noqa: BLE001
-                            pass
+                    if oai["mode"]:
+                        await ws.send(json.dumps({"type": "finalizing", "remaining": 1}))
+                        await oai_stop()
                         await oai_report_usage(force=True)
                         await ws.send(json.dumps({"type": "stopped"}))
                     elif cfg["model"] == "meta" and (meta["ws"] is not None or meta["connecting"] is not None):
@@ -919,17 +1213,10 @@ async def handle(ws, *_):
             n = len(arr)
             if n == 0:
                 continue
-            # realtime is connected → it does the full transcription (preview + finals);
+            # OpenAI realtime selected → it does the full transcription (preview + finals);
             # stream PCM to OpenAI and skip the local VAD/whisper entirely.
-            if oai["ws"] is not None:
-                oai["clock"] += n
-                try:
-                    await oai["ws"].send(
-                        json.dumps({"type": "input_audio_buffer.append", "audio": _pcm16_b64(_resample(arr, SAMPLE_RATE, 24000))})
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-                await oai_report_usage()
+            if oai["mode"]:
+                await oai_feed(arr)
                 continue
             if cfg["model"] == "meta" and cfg.get("metaKey"):
                 sample_offset += n
@@ -999,7 +1286,6 @@ async def handle(ws, *_):
                 and cfg.get("localPreview", True)  # off → no previews → finals get 100% of the GPU
                 and seg_samples >= MIN_SEG_SEC * SAMPLE_RATE
                 and (sample_offset - last_partial_off) >= PARTIAL_INTERVAL * SAMPLE_RATE
-                and oai["ws"] is None  # realtime overlay already provides live previews
             ):
                 last_partial_off = sample_offset
                 buf = np.concatenate(seg_chunks).astype(np.float32)
@@ -1011,14 +1297,15 @@ async def handle(ws, *_):
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     finally:
-        if oai["ws"] is not None:
-            oai["closing"] = True
+        oai["closing"], oai["mode"], oai["cur"] = True, False, None
+        if oai["connecting"] is not None:
+            oai["connecting"].cancel()
+        for cs in list(oai["conns"]):
+            cs["retired"] = True
             try:
-                await oai["ws"].close()
+                await cs["ws"].close()
             except Exception:  # noqa: BLE001
                 pass
-            if oai["task"]:
-                oai["task"].cancel()
         if meta["ws"] is not None or meta["connecting"] is not None:
             await meta_close(graceful=False)
         if live["session"] is not None:
@@ -1106,8 +1393,10 @@ async def do_refine(ws, msg, loop):
     def run():
         try:
             model_name = msg.get("model", "turbo")
-            if model_name == "live":
-                model_name = "turbo"  # the streaming engine has no batch mode — same weights anyway
+            if model_name in ("live", "openai"):
+                # no batch mode for the streaming engines: Live shares turbo's weights, and the OpenAI
+                # engine's file import runs locally on turbo (no cloud cost, real timestamps)
+                model_name = "turbo"
             language = _lang(msg.get("language"))
             ip = msg.get("initialPrompt") or None
             out = []

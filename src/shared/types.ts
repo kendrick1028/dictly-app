@@ -614,8 +614,10 @@ export interface MemoChatSummary {
 
 export type AudioSource = 'mic' | 'system'
 /** transcription engine: turbo (fast chunks) | large-v3 (accurate chunks) | live (Whisper Live streaming — text flows
- *  while speaking) | meta (Meta Muse Voice Transcribe cloud — needs a Meta Model API key; glossary → vocabulary biasing) */
-export type TranscribeModel = 'turbo' | 'large-v3' | 'live' | 'meta'
+ *  while speaking) | meta (Meta Muse Voice Transcribe cloud: needs a Meta Model API key; glossary → vocabulary biasing)
+ *  | openai (OpenAI Realtime gpt-live-transcribe cloud: deltas while speaking, one final per client-VAD turn; needs the
+ *  OpenAI API key from 연결. File import falls back to local turbo) */
+export type TranscribeModel = 'turbo' | 'large-v3' | 'live' | 'meta' | 'openai'
 /** transcription language: fixed Korean / English, or per-utterance auto-detect */
 export type SttLanguage = 'ko' | 'en' | 'auto'
 export const STT_LANGUAGES: { id: SttLanguage; label: string }[] = [

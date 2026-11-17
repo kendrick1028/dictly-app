@@ -327,19 +327,20 @@ async function buildSttConfig(): Promise<Record<string, unknown>> {
   const st = useStore.getState()
   const vad = await window.api.settings.getVad()
   const tr = await window.api.settings.getTranscribe()
+  // 'openai' is a cloud engine, not a Whisper size: the sidecar streams to OpenAI Realtime
+  // (gpt-live-transcribe) and keeps turbo as the local fallback model (no key / session lost).
+  const openai = st.rec.model === 'openai'
   return {
     type: 'config',
-    model: st.rec.model,
+    model: openai ? 'turbo' : st.rec.model,
     language: st.rec.language,
     initialPrompt: buildInitialPrompt(),
     silenceSec: vad.silenceSec,
     maxSec: vad.maxSec,
-    // Transcription is built-in: finals are always local Whisper. OpenAI Realtime
-    // (gpt-realtime-whisper) is used ONLY when the ⚙ live-preview toggle is on.
-    engine: 'local',
+    engine: openai ? 'openai-realtime' : 'local',
     apiKey: tr.apiKey,
-    oaiModel: 'gpt-realtime-whisper',
-    realtimePreview: tr.realtimePreview,
+    oaiModel: 'gpt-live-transcribe',
+    realtimePreview: false,
     localPreview: st.rec.localPreview,
     metaKey: tr.metaKey,
     keywords: buildKeywordList()
@@ -1040,7 +1041,7 @@ export async function stopRecording(): Promise<void> {
       usdTotal += cost.usd
       anyEstimate ||= u.estimate
       void window.api.usage
-        .add({ ts: Date.now(), provider: engine.startsWith('openai') ? 'openai' : engine, kind: engine === 'openai-realtime' ? 'preview' : 'live', audioSec: u.audioSec, usd: cost.usd, estimate: u.estimate, memoId: targetId })
+        .add({ ts: Date.now(), provider: engine.startsWith('openai') ? 'openai' : engine, kind: 'live', audioSec: u.audioSec, usd: cost.usd, estimate: u.estimate, memoId: targetId })
         .catch(() => {})
     }
     const krw = Math.round(usdTotal * (st.fxUsdKrw?.rate || 1350))

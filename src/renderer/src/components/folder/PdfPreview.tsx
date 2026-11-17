@@ -7,41 +7,10 @@ import { loadPdfDoc } from '../../lib/pdfText'
 import { PdfAnnotationLayer } from '../PdfAnnotationLayer'
 import { PdfAnnotationToolbar } from '../PdfAnnotationToolbar'
 import type { PDFDocumentProxy } from '../../pdf/pdfjs-setup'
+import { PdfPageBox, typicalPageSize } from '../../pdf/PdfPageBox'
 import type { PdfDoc } from '../../../../shared/types'
 
 const GAP = 12
-
-function PageCanvas({ doc, pageNum, scale, cssW, cssH }: { doc: PDFDocumentProxy; pageNum: number; scale: number; cssW: number; cssH: number }): JSX.Element {
-  const ref = useRef<HTMLCanvasElement>(null)
-  useEffect(() => {
-    let cancelled = false
-    let task: { cancel: () => void } | null = null
-    void (async () => {
-      try {
-        const page = await doc.getPage(pageNum)
-        if (cancelled) return
-        const canvas = ref.current
-        if (!canvas) return
-        const dpr = window.devicePixelRatio || 1
-        const viewport = page.getViewport({ scale: scale * dpr })
-        const ctx = canvas.getContext('2d')
-        if (!ctx) return
-        canvas.width = viewport.width
-        canvas.height = viewport.height
-        const rt = page.render({ canvasContext: ctx, viewport })
-        task = rt
-        await rt.promise
-      } catch {
-        /* cancelled on scroll/rescale */
-      }
-    })()
-    return () => {
-      cancelled = true
-      task?.cancel()
-    }
-  }, [doc, pageNum, scale])
-  return <canvas ref={ref} style={{ width: cssW, height: cssH }} className="block rounded bg-white shadow-md ring-1 ring-black/5" />
-}
 
 export function PdfPreview({ pdf, page, nonce }: { pdf: PdfDoc; page?: number; nonce?: number }): JSX.Element {
   const setFocusedPdf = useStore((s) => s.setFocusedPdf)
@@ -74,10 +43,10 @@ export function PdfPreview({ pdf, page, nonce }: { pdf: PdfDoc; page?: number; n
       .then(async (d) => {
         if (cancelled) return
         setDoc(d)
-        const p = await d.getPage(1)
+        // slot = the typical page (a wider cover would otherwise stretch every body page)
+        const s = await typicalPageSize(d)
         if (cancelled) return
-        const v = p.getViewport({ scale: 1 })
-        setUnit({ w: v.width, h: v.height })
+        setUnit(s)
       })
       .catch((e) => !cancelled && setError((e as Error).message))
     return () => {
@@ -160,8 +129,9 @@ export function PdfPreview({ pdf, page, nonce }: { pdf: PdfDoc; page?: number; n
         <div style={{ position: 'relative', width: pageW, height: Math.max(0, total * rowH - GAP), margin: '0 auto' }}>
           {pages.map((i) => (
             <div key={i} style={{ position: 'absolute', top: (i - 1) * rowH, left: 0, width: pageW, height: pageH }}>
-              <PageCanvas doc={doc} pageNum={i} scale={fitScale} cssW={pageW} cssH={pageH} />
-              <PdfAnnotationLayer doc={doc} pdfId={pdf.id} page={i} pageW={pageW} pageH={pageH} />
+              <PdfPageBox doc={doc} pageNum={i} slot={unit} layoutScale={fitScale} renderScale={fitScale}>
+                {(w, h) => <PdfAnnotationLayer doc={doc} pdfId={pdf.id} page={i} pageW={w} pageH={h} />}
+              </PdfPageBox>
             </div>
           ))}
         </div>
